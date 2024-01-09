@@ -120,8 +120,19 @@ desired_tile_res = 50
 ### Set the desired buffer size in metres
 desired_buffer_size = 10
 
+###__________________________________________________________###
+### Set parameters for the Canopy Height Model (CHM) ###
+###__________________________________________________________###
+
 ### Set the maximum height for the canopy height model
 max_height_threshold = 60
+### Set the desired raster resolution in metres for the canopy height model
+desired_chm_res = 1
+
+### Set the maximum height for the stem-only canopy height model
+max_stem_height_threshold = 60
+### Set the minimum height for the stem-only canopy height model
+min_stem_height_threshold = 60
 
 ### Set the window size for top down tree detection in metres
 window_size = 3.5
@@ -152,7 +163,7 @@ ggplot2::ggplot() +
   geom_sf(data = roi_temp, alpha = 0, color = "black") +
   theme_void()
 # clip the las and write
-fnm_temp  = list.files(input_las_dir, pattern = "\\.laz$", full.names = T)[1]
+fnm_temp  = list.files(input_las_dir, pattern = ".*\\.(laz|las)$", full.names = T)[1]
 lidR::clip_roi(ctg_temp, roi_temp) %>% 
   lidR::writeLAS(file = fnm_temp)
 # re-read and map
@@ -982,7 +993,7 @@ las2dtm2df <- function(file_path_name, des_dtm_res = 3) {
   return(dtm_points)
 }
 ## map files over the function
-# list.files(config$las_ground_tile_dir, pattern = "\\.laz$", full.names = T) %>%
+# list.files(config$las_ground_tile_dir, pattern = ".*\\.(laz|las)$", full.names = T) %>%
 #   .[2:3] %>%
 #   purrr::map(las2dtm2df) %>%
 #   dplyr::bind_rows() %>%
@@ -1025,7 +1036,7 @@ rasterize_tiles_to_dtm = function(
   ### Loop through and generate DTM data.frame for each tile and then bind_rows
   start_time = Sys.time()
   # file list
-  tile_list = list.files(config$las_ground_tile_dir, pattern = "\\.laz$", full.names = T)
+  tile_list = list.files(config$las_ground_tile_dir, pattern = ".*\\.(laz|las)$", full.names = T)
   # map las2dtm2df function
   merged_dtm_points = tile_list %>%
     purrr::map(las2dtm2df, des_dtm_res = my_des_dtm_res) %>%
@@ -1172,47 +1183,65 @@ The process loops over each normalized point cloud grid tile and creates a Canop
 3. A data frame with all tiles combined is created, 
 4. This all-tiles data frame is converted back to a `las`, 
 5. which is then rasterized again using `lidR::rasterize_canopy` with the `p2r` algorithm to select the highest point in a raster tile. 
-
 This could result in i) empty cells; and/or ii) a less smooth DTM which is influenced by artifact points (especially since the current outlier removal is applied only to the non-ground points *after* the classification algorithm is applied). Furthermore, as a  DTM is created for each tile separately, there is potential for edge effects to be amplified across the study extent. Calculating the DTM for each tile separately excludes valid data which would be otherwise available to the algorithm if processed altogether. A potential solution is to continue processing by grid tiles with a buffer that overlaps with neighboring tiles, use a multi-point interpolation algorithm (e.g. `knnidw`) on each buffered tile, and then combine the grid tile rasters via `terra::mosaic` where values in overlapping cells are averaged. Or, process as a single point cloud over the entire study extent.</span>
 
 ```{r create-chm-fn}
 # GW added
 # create funtion to read las, rasterize, and return data frame
-las2chm2df <- function(file_path_name, des_chm_res = 3) {
+las2chm2df <- function(file_path_name, des_chm_res = 3, min_z = -Inf, max_z = Inf) {
   ### Read in the file
   las_norm_tile = lidR::readLAS(file_path_name, select = "xyzc")
   
-  ### Create a CHM from the file
-  chm_tile = lidR::rasterize_canopy(
-    las_norm_tile
-    , res = des_chm_res
-    , algorithm = p2r()
-    , pkg = "terra"
-  )
+  ### Filter the points to within the min and max Z range 
+    las_norm_tile = lidR::filter_poi(las_norm_tile, Z > as.numeric(min_z))
+    las_norm_tile = lidR::filter_poi(las_norm_tile, Z < as.numeric(max_z))
+    
+  ### Get a logic check 
+  is_las_empty = lidR::is.empty(las_norm_tile)
   
-  ### Get the DEM points
-  chm_points = as.data.frame(chm_tile, xy = T) %>% 
-    dplyr::rename_with(toupper)
-  
-  ### Return the points to the function 
-  return(chm_points)
+  ### If the las file is empty, return NULL
+  if(is_las_empty == TRUE){return(
+    data.frame(
+      X=as.numeric(NULL)
+      , Y=as.numeric(NULL)
+      , Z=as.numeric(NULL)
+    )
+  )}else{
+    ### Create a CHM from the file
+    chm_tile = lidR::rasterize_canopy(
+      las_norm_tile
+      , res = des_chm_res
+      , algorithm = p2r()
+      , pkg = "terra"
+    )
+    
+    ### Get the DEM points
+    chm_points = as.data.frame(chm_tile, xy = T) %>% 
+      dplyr::rename_with(toupper)
+    
+    ### Return the points to the function 
+    return(chm_points)
+  }
 }
 ## map files over the function
-# list.files(config$las_norm_tile_dir, pattern = "\\.laz$", full.names = T) %>%
-#   .[2:2] %>%
-#   purrr::map(las2chm2df, des_chm_res = 1) %>%
+# list.files(config$las_norm_tile_dir, pattern = ".*\\.(laz|las)$", full.names = T) %>%
+#   .[2:3] %>%
+#   purrr::map(las2chm2df, des_chm_res = 3) %>%
 #   dplyr::bind_rows() %>%
 #   str()
+#   # dplyr::pull(Z) %>% 
+#   # max(na.rm=T)
   
 
 ### Function to get CHM from height normalized tiles
 rasterize_tiles_to_chm = function(
   config
   , my_des_chm_res = 3 #in meters
-  , max_height_threshold = 60
   , calculate_extent = TRUE
   , my_las_grid = las_grid # generate_grid_over_extent(las_ctg, desired_tile_res)
   , my_las_ctg = las_ctg # lidR::readLAScatalog(config$input_las_dir)
+  , my_min_z = -Inf
+  , my_max_z= Inf
 ){
   # define files
   las_grid = my_las_grid
@@ -1242,33 +1271,33 @@ rasterize_tiles_to_chm = function(
   ### Loop through and generate DTM data.frame for each tile and then bind_rows
   start_time = Sys.time()
   # file list
-  tile_list = list.files(config$las_norm_tile_dir, pattern = "\\.laz$", full.names = T)
+  tile_list = list.files(config$las_norm_tile_dir, pattern = ".*\\.(laz|las)$", full.names = T)
   # map las2chm2df function
   merged_chm_points = tile_list %>%
-    purrr::map(las2chm2df, des_chm_res = my_des_chm_res) %>%
+    purrr::map(las2chm2df, des_chm_res = my_des_chm_res, min_z = my_min_z, max_z = my_max_z) %>%
     # .[2:3] %>%
     dplyr::bind_rows()
   ###_____________________________________###
   ### Make a las file from the CHM points ###
   ###_____________________________________###
   
-  message("Generating the master LiDAR file ... ")
+  message("Generating the CHM las file ... ")
   des_crs = sf::st_crs(las_grid)
   las = lidR::LAS(merged_chm_points)
   sf::st_crs(las) = des_crs
   # las
   
-  ### Drop noise points
-  message("Dropping noise points above set threshold ... ")
-  las = lidR::filter_poi(las, Z < max_height_threshold)
-  
   ### Write cleaned las to the disk
-  message("Writing the master lidar file to the disk ... ")
+  message("Writing the CHM las file to the disk ... ")
   lidR::writeLAS(
     las
     , file = paste0(
       config$delivery_las_dir
-      , "/master_chm_point_cloud.las"
+      , "/master_chm_point_cloud_z"
+      , as.character(my_min_z)
+      , "to"
+      , as.character(my_max_z)
+      , ".las"
     )
   )
   
@@ -1280,7 +1309,7 @@ rasterize_tiles_to_chm = function(
   ### Generate a CHM from the CHM points ###
   ###____________________________________###
   
-  message("Generating the master CHM file ... ")
+  message("Generating the CHM raster file ... ")
   master_chm = lidR::rasterize_canopy(las, res = my_des_chm_res, algorithm = p2r(), pkg="terra")
   # master_chm
   
@@ -1288,8 +1317,18 @@ rasterize_tiles_to_chm = function(
   ### Write the master raster to the disk ###
   ###_____________________________________###
   
-  message("Writing the master CHM file to the disk ... ")
-  outname = paste0(config$delivery_spatial_dir,"/master_chm_raster_", my_des_chm_res, "m.tif")
+  message("Writing the CHM raster file to the disk ... ")
+  outname = paste0(
+    config$delivery_spatial_dir
+    ,"/chm_raster_z"
+    , as.character(my_min_z)
+    , "to"
+    , as.character(my_max_z)
+    , "m_res"
+    , my_des_chm_res
+    , "m.tif"
+    
+  )
   terra::writeRaster(master_chm, outname, overwrite = TRUE)
   
   ###_______________________________________###
@@ -1338,11 +1377,12 @@ Call the function to create the CHM
 ```{r create-chm, results='hide', fig.show='hide', message=FALSE}
 rasterize_tiles_to_chm(
   config = config
-  , my_des_chm_res = 1 #0.25 #in meters
-  , max_height_threshold = max_height_threshold
+  , my_des_chm_res = desired_chm_res #0.25 #in meters
   , calculate_extent = F
   , my_las_grid = las_grid # generate_grid_over_extent(las_ctg, desired_tile_res)
   , my_las_ctg = las_ctg # lidR::readLAScatalog(config$input_las_dir)
+  , my_min_z = -Inf
+  , my_max_z= max_height_threshold
 )
 ```
 
@@ -1350,12 +1390,18 @@ Map the CHM
 
 ```{r map-chm}
 terra::rast(paste0(
-  config$delivery_spatial_dir
-  , "/master_chm_raster_1m.tif"
-)) %>%
+    config$delivery_spatial_dir
+    ,"/chm_raster_z"
+    , as.character(-Inf)
+    , "to"
+    , as.character(max_height_threshold)
+    , "m_res"
+    , desired_chm_res
+    , "m.tif"
+  )) %>%
   stars::st_as_stars() %>% 
   mapview::mapview(
-    layer.name = "elev.(m)"
+    layer.name = "CHM ht (m)"
     , alpha.regions = 0.6
   )
 # # uncomment for ggplot
@@ -1374,152 +1420,559 @@ remove(list = ls()[grep("_temp",ls())])
 gc()
 ```
 
----
+# Create *Stem-Only* Canopy Height Model{#create_stem_chm}
 
-```{r, eval=F, include=F}
-### Function to generate a quick master stem canopy height model from normalized tiles
-rasterize_tiles_to_stem_chm = function(config, des_stem_chm_res, min_z, max_z, calculate_extent){
+This section uses the height normalized point cloud grid tiles (created in [this section](#classify_points)) to create a CHM raster using only points between a specified height based on the program defined in [this section](#create_chm). The stem section at DBH includes points that fall between 1.2 and 1.4 meters.
+
+<span style="color: red;">George W. notes: it is unclear what this data is used for...the `las` file may be used to extract DBH measurements using the `TreeLS` package. See page 3 of [Swayze and Tinkham (2022)](https://scholar.google.com/scholar?oi=bibs&hl=en&cluster=10655866445299954513). However, it is likely that the point cloud would need to be filtered based on point color to ensure extraction of stem points and not understory (e.g. tree regeneration) points.</span>
+
+Call the function to create the *stem-only* CHM
+
+```{r create-stem-chm, results='hide', fig.show='hide', message=FALSE}
+###_____________________________________________________###
+### Rasterize the stem section at DBH to stem CHM tiles ###
+###_____________________________________________________###
+rasterize_tiles_to_chm(
+  config = config
+  , my_des_chm_res = 0.5 #0.07 #in meters
+  , calculate_extent = F
+  , my_las_grid = las_grid # generate_grid_over_extent(las_ctg, desired_tile_res)
+  , my_las_ctg = las_ctg # lidR::readLAScatalog(config$input_las_dir)
+  , my_min_z = 1.2
+  , my_max_z= 1.4
+)
+```
+
+Map the *stem-only* CHM
+
+```{r map-stem-chm}
+terra::rast(paste0(
+    config$delivery_spatial_dir
+    ,"/chm_raster_z"
+    , as.character(1.2)
+    , "to"
+    , as.character(1.4)
+    , "m_res"
+    , as.character(0.5)
+    , "m.tif"
+  )) %>%
+  # terra::aggregate(fact = 20, fun = "mean") %>%
+  stars::st_as_stars() %>% 
+  mapview::mapview(
+    layer.name = "stem-only ht (m)"
+    , alpha.regions = 0.6
+  )
+# # uncomment for ggplot
+#   as.data.frame(xy=T) %>% 
+#   dplyr::rename_with(tolower) %>% 
+#   dplyr::rename(f=3) %>% 
+#   ggplot(mapping = aes(x=x,y=y,fill=f)) +
+#     geom_tile() +
+#     scale_fill_viridis_c(na.value = "black") +
+#     labs(fill = "elevation (m)") +
+#     theme_void()
+```
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE, include=FALSE}
+remove(list = ls()[grep("_temp",ls())])
+gc()
+```
+
+# Detect Stems
+
+```{r detect-stem-fn, include=TRUE, eval=FALSE}
+### Function to detect stems within normalized tiles
+# detect_stems_within_tiles = function(config, dbh_max_size_m){
+  # config = config
+  # , my_des_chm_res = 0.5 #0.07 #in meters
+  # , calculate_extent = F
+  # , my_las_grid = las_grid # generate_grid_over_extent(las_ctg, desired_tile_res)
+  # , my_las_ctg = las_ctg # lidR::readLAScatalog(config$input_las_dir)
+  # , my_min_z = 1.2
+  # , my_max_z= 1.4
   
+  
+  # define files
+    las_grid = my_las_grid
+    las_ctg = my_las_ctg
   ###_______________________###
   ### Configure directories ###
   ###_______________________###
   
-  message("Initializing stem canopy height model rasterization ... ")
+  message("Initializing tree stem detection algorithm ... ")
   master_start = Sys.time()
   
-  ###_____________________________###
-  ### Read in the las grid object ###
-  ###_____________________________###
-  
-  message("Reading in project grid ... ")
-  setwd(config$las_grid_dir)
-  las_grid = sfarrow::st_read_parquet("project_grid.parquet")
-  
-  message("Reading in the las as a lascatalog for indexing ... ")
-  las_ctg = lidR::readLAScatalog(config$input_las_dir)
-  las_ctg
-  
-  ###_______________________________________________________________________________###
-  ### Get a list of classified ground normalized tiles to generate CHM raster files ###
-  ###_______________________________________________________________________________###
-  
-  message("Getting a list of tiles to rasterize ... ")
-  tile_list = list.files(config$las_norm_tile_dir, pattern = ".laz")
-  
-  ### Loop through and generate CHM files for each tile
-  stem_start = Sys.time()
+  ####____________________________________###
+  ### Get a list of .las files to process ###
+  ###_____________________________________###
+  tile_list = list.files(config$las_norm_tile_dir, pattern = ".*\\.(laz|las)$", full.names = F)
+  # tile_list
   message("Processing ", length(tile_list), " las files in parallel ... ")
-  start_time = Sys.time()
-  cores = detectCores()-1
-  cluster = makeCluster(cores)
-  registerDoParallel(cluster)
-  chm_point_list = foreach(i = 1:length(tile_list), .packages = c("lidR", "terra", "data.table", "sf")) %dopar% {
+  
+  ###____________________________________________________________###
+  ### Get the extent of the las directory as a lascatalog object ###
+  ###____________________________________________________________###
+  
+  las_extent = lidR::readALSLAScatalog(config$las_norm_tile_dir)
+  las_extent = las_extent@data
+  # las_extent %>% str()
+  
+  ### select columns from the las extent
+  las_extent = las_extent %>% 
+    dplyr::select(filename, Number.of.point.records) %>% 
+    dplyr::mutate(
+      las_name = basename(filename)
+      , extent_area = sf::st_area(las_extent) %>% as.numeric()
+      , number_points = Number.of.point.records
+    )
+  # las_extent %>% str()
+  
+  ###____________________________________________________###
+  ### Loop through the las files and try to detect stems ###
+  ###____________________________________________________###
+  
+  stem_start = Sys.time()
+  ## !!!!!! TURNED OFF PARALLEL B/C IT KILLS STUFF
+  # cores = parallel::detectCores()
+  # message("Registering parallel session on ", cores-1, " cores ... ")
+  # cluster = parallel::makeCluster(cores-1)
+  # doParallel::registerDoParallel(cluster)
+  # stem_detection_status_grid_list = foreach(
+  #   i = 1:length(tile_list), 
+  #     .packages = c("TreeLS", "sf", "lidR", "ForestTools", "terra", "dplyr", "raster"),
+  #     .errorhandling = "remove",
+  #     .inorder = FALSE
+  # ) %dopar% {
+  ## !!!!!! TURNED OFF PARALLEL B/C IT KILLS STUFF
+                                          
+    ### Get the desired las file
+    las_name = tile_list[i]
+    # las_name
     
-    ### Get the desired tile
-    des_tile_name = tile_list[i]
+    ### See if the file has been generated
+    path_to_check = paste0(config$las_stem_dir, "/", las_name)
+    does_file_exist = file.exists(path_to_check)
+    # does_file_exist
     
-    ### Read in the file
-    setwd(config$las_norm_tile_dir)
-    las = lidR::readLAS(des_tile_name, select = "xyzc")
+    if(does_file_exist == TRUE){
+      message("stem detect laz for grid number ", i, " already exists guy ... ")
+    }
     
-    ### Filter the points to within the min and max Z range 
-    las = lidR::filter_poi(las, Z > min_z)
-    las = lidR::filter_poi(las, Z < max_z)
+    ### Read in the desired las file
+    las_path = paste0(config$las_norm_tile_dir, "/", las_name)
+    las_norm_tile = lidR::readLAS(las_path)
+    las_norm_tile = lidR::filter_duplicates(las_norm_tile)
+    st_crs(las_norm_tile) = st_crs(las_grid)
+    # plot(las_norm_tile)
+    # get the maximum point height
+    max_point_height = max(las_norm_tile@data$Z)
+    ### Filter the extent polygon sf/data.frame for the tile
+    tile_extent = las_extent %>% 
+      dplyr::filter(filename == las_path) %>% 
+      dplyr::mutate(
+        las_area_m2 = extent_area
+        , max_point_height = max_point_height
+      )
+    # tile_extent %>% str()
+    ###____________________________________________________________###
+    ### If the max point height is below X feet, return empty tile ###
+    ###____________________________________________________________###
     
-    ### Get a logic check 
-    is_las_empty = lidR::is.empty(las)
-    is_las_empty
-    
-    ### If the las file is empty, return NULL
-    if(is_las_empty == TRUE){return(NULL)}
-    
-    ### If the las file isnt empty, make a stem CHM
-    if(is_las_empty == FALSE){
+    if(max_point_height < 2){
       
-      ### Create a CHM from the file
-      chm = lidR::rasterize_canopy(las, res = des_stem_chm_res, algorithm = p2r())
+      ### Compile extent polygon statistics for failed file
       
-      ### Pull the X, Y, and Z columns
-      df = cbind(las@data$X, las@data$Y, las@data$Z)
-      df = data.table::as.data.table(df)
+      ### Append the extent polygon stats to the polygon file
+      tile_extent = tile_extent %>% 
+        dplyr::mutate(
+          stem_detection_status = "no points below 2m"
+          , number_stems_detected = "0"
+          , max_stem_dbh = "0"
+          , mean_stem_dbh = "0"
+        )
+      return(tile_extent)
+    }
+    
+    ###_____________________________________________________###
+    ### Define function to map for potential tree locations ###
+    ###_____________________________________________________###
       
-      ### Return the points to the function 
-      return(df)
+      ### Function to map for potential tree locations
+      tree_map_function <- function(las){
+        result <- tryCatch(
+          expr = {
+            
+            map = TreeLS::treeMap(las, map.hough(min_h = 1,
+                                                 max_h = 5,
+                                                 h_step = 0.5,
+                                                 pixel_size = 0.025,
+                                                 max_d = 0.6,
+                                                 min_density = 0.0001,
+                                                 min_votes = 3), 0)
+          },
+          error = function(e) {
+            message <- paste("Error:", e$message)
+            return(message)
+          }
+        )
+        
+        if (inherits(result, "error")) {
+          return(result)
+        } else {
+          return(result)
+        }
+      }
+    
+    
+    ###______________________________________________________________###
+    ### If the max point height is above X feet, try to detect stems ###
+    ###______________________________________________________________###
+    
+    # if(max_point_height > 2){
+      
+      
+      
+      ### Run the function to search for candidate locations
+      result = tree_map_function(las)
+      
+      ### Get a logic check
+      check = class(result)
+      check
+      
+      ###_______________________________________________________________###
+      ### If the class of the result === Character, then no stems found ###
+      ###_______________________________________________________________###
+      
+      if(check == "character"){
+        
+        ### Compile extent polygon statistics for failed file
+        stem_detection_status = "no stems found"
+        number_stems_detected = 0
+        max_stem_dbh = 0
+        mean_stem_dbh = 0
+        
+        ### Append the extent polygon stats to the polygon file
+        extent = cbind(extent, stem_detection_status, number_stems_detected, max_stem_dbh, mean_stem_dbh)
+        return(extent)
+        
+      }
+      
+      ### If the class of the result == "LAS"
+      if(check == "LAS"){
+        
+        ###___________________________________###
+        ### Classify the tree and stem points ###
+        ###___________________________________###
+        
+        ### Merge stems
+        result = TreeLS::treeMap.merge(result)
+        
+        ### Classify tree regions
+        las = TreeLS::treePoints(las, result, trp.crop(l = 3))
+        
+        ### Classify stem points
+        las = TreeLS::stemPoints(las, stm.hough(h_step = 0.5,
+                                                max_d = 0.6,
+                                                h_base = c(1, 2.5),
+                                                pixel_size = 0.025,
+                                                min_density = 0.1,
+                                                min_votes = 3))
+        
+        ###_______________________________________________________###
+        ### Set the classification codes of different point types ###
+        ###_______________________________________________________###
+        
+        ### Pull out the stem files
+        stem_points = lidR::filter_poi(las, Stem == TRUE)
+        stem_points@data$Classification = 4
+        
+        ### Pull out the ground points
+        ground = filter_poi(las, Classification == 2)
+        
+        ### Pull out the remaining points that arent ground
+        remaining_points = filter_poi(las, Stem == FALSE)
+        remaining_points@data$Classification = 5
+        
+        ### Combine the newly classified data
+        las_reclassified = rbind(stem_points, ground, remaining_points)
+        
+        ### Write the stem points to the disk
+        setwd(config$las_stem_dir)
+        lidR::writeLAS(las_reclassified, las_name)
+        
+        ###_______________________________________________________###
+        ### GET THE STEM CYLINDER MEASUREMENTS AND STEM INVENTORY ###
+        ###_______________________________________________________###
+        
+        ### Search through tree points and estimate DBH
+        tree_inv = TreeLS::tlsInventory(las, dh = 1.37, dw = 0.2, d_method = shapeFit(shape = "circle", algorithm = "ransac", n = 20)) 
+        tree_inv$Radius = as.numeric(tree_inv$Radius)
+        tree_inv$dbh_m = tree_inv$Radius*2
+        tree_inv$dbh_cm = tree_inv$dbh_m*100
+        tree_inv$basal_area_m2 = pi * (tree_inv$Radius)^2
+        tree_inv$basal_area_ft2 = tree_inv$basal_area_m2 * 10.764
+        tree_inv
+        
+        ###_____________________________###
+        ### Create spatial file outputs ###
+        ###_____________________________###
+        
+        ### Create Spatial file of stem inventory
+        des_crs = sf::st_crs(las_grid)
+        tree_inv_sf = sf::st_as_sf(tree_inv, coords = c("X", "Y"), crs = des_crs)
+        inv_coords = sf::st_coordinates(tree_inv_sf)
+        tree_inv_sf = cbind(tree_inv_sf, inv_coords)
+        
+        ### Make TreeIDs unique
+        tree_ID = paste0(tree_inv_sf$X, "_", tree_inv_sf$Y)
+        tree_inv_sf = cbind(tree_inv_sf, tree_ID)
+        
+        ### Drop unwanted columns
+        tree_inv_sf = subset(tree_inv_sf, select = -c(TreeID))
+        tree_inv_sf = subset(tree_inv_sf, select = c(tree_ID, H, X, Y, Radius, Error, dbh_m, dbh_cm, basal_area_m2, basal_area_ft2))
+        
+        ### Rename the columns to be a bit more helpful
+        names(tree_inv_sf) = c("treeID", "tree_height_m", "stem_x", "stem_y", 
+                               "radius_m", "radius_error_m", "dbh_m", "dbh_cm", 
+                               "basal_area_m2", "basal_area_ft2", "geometry")
+        
+        ### Remove points outside the extent polygon
+        extent_buffer = sf::st_buffer(extent, 1)
+        tree_inv_sf = sf::st_crop(tree_inv_sf, extent_buffer)
+        
+        ### Write stem polygons to the disk
+        setwd(config$stem_poly_tile_dir)
+        out_name = tools::file_path_sans_ext(las_name)
+        out_name = paste0(out_name, ".parquet")
+        sfarrow::st_write_parquet(tree_inv_sf, out_name)
+        
+        ###__________________________________________________###
+        ### Return the extent with values for tree detection ###
+        ###__________________________________________________###
+        
+        ### Compile extent polygon statistics for failed file
+        stem_detection_status = "stems detected"
+        number_stems_detected = nrow(tree_inv_sf)
+        max_stem_dbh = max(tree_inv_sf$dbh_cm)
+        mean_stem_dbh = mean(tree_inv_sf$dbh_cm)
+        
+        ### Append the extent polygon stats to the polygon file
+        extent = cbind(extent, stem_detection_status, number_stems_detected, max_stem_dbh, mean_stem_dbh)
+        extent
+        return(extent)}
       
     }
     
   }
+
   stopCluster(cluster)
   stem_end = Sys.time()
   stem_total = difftime(stem_end, stem_start, units = c("mins"))
-  message("Total stem CHM extraction took ", stem_total, " minutes ... ")
+  message("Stem detection complete, took ", stem_total, " minutes ... ")
   
-  ### Merge the CHM points
-  message("Merging the stem points into a master las file ... ")
-  las = data.table::rbindlist(chm_point_list) 
-  colnames(las) = c("X", "Y", "Z")
-  las = lidR::LAS(las)
-  st_crs(las) = st_crs(las_grid)
+  ###______________________________________________________###
+  ### Compose a status grid for the stem detection attempt ###
+  ###______________________________________________________###
   
-  ### Write cleaned las to the disk
-  message("Writing the master lidar file to the disk ... ")
+  ### Merge the list into an SF object
+  stem_detection_status_grid = sf::st_as_sf(data.table::rbindlist(stem_detection_status_grid_list))
+  grid_with_status = subset(stem_detection_status_grid, select = c(stem_detection_status))
+  grid_with_count = subset(stem_detection_status_grid, select = c(number_stems_detected))
+  mapview(grid_with_count)
+  
+  ###________________________________###
+  ### Get the grid tiles that failed ###
+  ###________________________________###
+  
+  ### Pull in the full grid using the las extent, then grab any missing files from the stem detection
+  grid_cells_that_failed = las_extent[!(las_extent$filename %in% stem_detection_status_grid$filename),]
+  grid_cells_that_failed
+  
+  ### Append the missing information to the grid cells that failed
+  las_area_m2 = rep("NA", nrow(grid_cells_that_failed))
+  max_point_height = rep("NA", nrow(grid_cells_that_failed))
+  stem_detection_status = rep("failed to process", nrow(grid_cells_that_failed))
+  number_stems_detected = rep("NA", nrow(grid_cells_that_failed))
+  max_stem_dbh = rep("NA", nrow(grid_cells_that_failed))
+  mean_stem_dbh = rep("NA", nrow(grid_cells_that_failed))
+  
+  ### Append the empty fill data to the remaining grid
+  grid_cells_that_failed = cbind(grid_cells_that_failed, las_area_m2, max_point_height, stem_detection_status, 
+                                 number_stems_detected, max_stem_dbh, mean_stem_dbh)
+  
+  ###________________________________________________###
+  ### Combine the status grid and the remaining grid ###
+  ###________________________________________________###
+  
+  final_status_grid = rbind(stem_detection_status_grid, grid_cells_that_failed)
+  test = subset(final_status_grid, select = c(stem_detection_status))
+  mapview(test)
+  
+  num_files_failed = nrow(grid_cells_that_failed)
+  message(num_files_failed, " files failed to process ...")
+  
+  ### Write the status grid to the delivery folder
+  setwd(config$working_spatial_dir)
+  sf::st_write(final_status_grid, dsn = "bottom_up_stem_detection_status_grid.gpkg", append = FALSE, quiet = TRUE)
+  
+  ###___________________________________________________###
+  ### Merge the stem las point files into a single file ###
+  ###___________________________________________________###
+  
+  ### Get a list of stem point files to process
+  message("Merging the stem points into a single file ... ")
+  stem_point_list = list.files(config$las_stem_dir, pattern = ".laz$")
+  stem_point_list
+  
+  ### Loop through the las files and pull the points in df format
+  start_time = Sys.time()
+  cores = detectCores()
+  cluster = makeCluster(cores)
+  registerDoParallel(cluster)
+  stem_points_list = foreach(i=1:length(stem_point_list),
+                             .errorhandling = "remove",
+                             .inorder = FALSE, 
+                             .packages = c("data.table", "lidR")) %dopar% {
+                               
+                               ### Get the desired las name
+                               des_las_name = stem_point_list[i]
+                               
+                               ### Read in the stem points
+                               setwd(config$las_stem_dir)
+                               des_las = lidR::readLAS(des_las_name)
+                               des_las
+                               
+                               ### Grab the dataframe
+                               df = des_las@data
+                               
+                               ### Pull the stem only points
+                               stem_point_df = df[df$Classification == 4,]
+                               stem_point_df
+                               
+                               ### Return the dataframe
+                               return(stem_point_df)
+                               
+                             }
+  stopCluster(cluster)
+  
+  ### Bind the list into a single object
+  merged_stem_points = rbindlist(stem_points_list)
+  merged_stem_points
+  
+  ### Points to LAS
+  stem_points_las = lidR::LAS(merged_stem_points)
+  st_crs(stem_points_las) = st_crs(las_grid)
+  
+  ### Write the las file to the disk
   setwd(config$delivery_las_dir)
-  lidR::writeLAS(las, file = "master_stem_chm_point_cloud.las")
-  
-  las_area_m2 = lidR::area(las)
-  las_area_acres = las_area_m2/4047
-  message("Total merged stem CHM area of ", las_area_acres, " acres .... ")
-  
-  ###____________________________________###
-  ### Generate a CHM from the CHM points ###
-  ###____________________________________###
-  
-  message("Generating the master stem CHM file ... ")
-  master_chm = lidR::rasterize_canopy(las, res = des_stem_chm_res, algorithm = p2r())
-  
-  ###_____________________________________###
-  ### Write the master raster to the disk ###
-  ###_____________________________________###
-  
-  message("Writing the master stem CHM file to the disk ... ")
-  setwd(config$delivery_spatial_dir)
-  outname = paste0("master_stem_chm_raster_", des_stem_chm_res, "m.tif")
-  terra::writeRaster(master_chm, outname, overwrite = TRUE)
-  
-  ###_______________________________________###
-  ### Get a polygon of the full file extent ###
-  ###_______________________________________###
-  
-  if(calculate_extent == TRUE){
-    
-    message("Getting the extent of the stem CHM file ... ")
-    extent_raster = terra::clamp(master_chm, 1, 1, 1)
-    extent_poly = terra::as.polygons(extent_raster)
-    #extent_poly = terra::simplifyGeom(extent_poly)
-    #extent_poly = terra::fillHoles(extent_poly)
-    extent_poly = sf::st_as_sf(extent_poly)
-    extent_poly = st_union(extent_poly)
-    extent_poly = st_as_sf(extent_poly)
-    extent_poly
-    
-    ### Write the poly to the disk
-    setwd(config$working_spatial_dir)
-    #sf::st_write(extent_poly, dsn = "chm_extent_kml.kml", delete_dsn = TRUE, quiet = TRUE)
-    sf::st_write(extent_poly, dsn = "stem_chm_extent_geopackage.gpkg", delete_dsn = TRUE, quiet = TRUE)
-    
-  }
-  
-  
-  ###____________________###
-  ### Get the total time ###
-  ###____________________###
-  
+  lidR::writeLAS(stem_points_las, "detected_stem_points.las")
   end_time = Sys.time()
   total_time = difftime(end_time, start_time, units = c("mins"))
-  print(paste("Total lidar rasterization took ", total_time, " minutes ... "))
+  message("Total stem merging took ", total_time, " minutes ... ")
+  
+  ###__________________________________________________________###
+  ### Merge the stem point location tiles into a single object ###
+  ###__________________________________________________________###
+  
+  ### Get a list of stem point locations to merge
+  message("Merging the stem point locations in parallel ... ")
+  setwd(config$stem_poly_tile_dir)
+  poly_list = list.files(config$stem_poly_tile_dir, pattern = ".parquet")
+  poly_list
+  
+  ### Loop through in parallel and read in the stem point location files
+  merge_start = Sys.time()
+  cores = detectCores()
+  cluster = makeCluster(cores)
+  registerDoParallel(cluster)
+  merged_poly_list = foreach(i = 1:length(poly_list)) %dopar% {
+    
+    ### Get the desired polygon
+    des_poly_name = poly_list[i]
+    
+    ### Read it in
+    setwd(config$stem_poly_tile_dir)
+    des_poly = sfarrow::st_read_parquet(des_poly_name)
+    des_poly = sf::st_make_valid(des_poly)
+    ### Return to foreach
+    return(des_poly)
+    
+  }
+  stopCluster(cluster)
+  
+  ### Merge the stem points to a single file
+  dbh_locations_sf = st_as_sf(rbindlist(merged_poly_list))
+  st_crs(dbh_locations_sf) = st_crs(las_grid)
+  merge_end = Sys.time()
+  merge_total = difftime(merge_end, merge_start, units = c("mins"))
+  message("Tree stem point location merge complete, took ", merge_total, " minutes ...")
+  
+  ###________________________________________________###
+  ### CLEAN UP THE STEM POLYGONS WITH SOME FILTERING ###
+  ###________________________________________________###
+  
+  ### Get the NA condition
+  is_na = is.na(dbh_locations_sf$radius_m)
+  dbh_locations_sf = cbind(dbh_locations_sf, is_na)
+  dbh_locations_sf
+  
+  ### Drop stems with NA values
+  dbh_locations_sf = dbh_locations_sf[dbh_locations_sf$is_na == "FALSE",]
+  dbh_locations_sf = subset(dbh_locations_sf, select = -c(is_na))
+  dbh_locations_sf
+  
+  ### Drop DBHs above set threshold 
+  dbh_locations_sf = dbh_locations_sf[dbh_locations_sf$dbh_m < dbh_max_size_m,]
+  dbh_locations_sf
+  
+  ### Remove empty geometry stem locations
+  condition = sf::st_is_empty(dbh_locations_sf)
+  dbh_locations_sf = cbind(dbh_locations_sf, condition)
+  dbh_locations_sf = dbh_locations_sf[dbh_locations_sf$condition == FALSE,]
+  dbh_locations_sf
+  
+  ### Reset the condition
+  dbh_locations_sf$condition = rep("detected_stem", nrow(dbh_locations_sf))
+  dbh_locations_sf
+  
+  ###K Buffer the points by the radius of the DBH
+  dbh_locations_sf_buffer = sf::st_buffer(dbh_locations_sf, dist = dbh_locations_sf$radius_m)
+  
+  ###___________________________________________________________###
+  ### Write the DBHs and the merged canopy polygons to the disk ###
+  ###___________________________________________________________###
+  print(paste0("Writing the merged canopies and the detected stems to the disk ... "))
+  setwd(config$working_spatial_dir)
+  sf:::st_write(dbh_locations_sf, dsn = "bottom_up_detected_stem_locations.gpkg", append = FALSE, delete_dsn = TRUE, quiet = TRUE)
+  sf:::st_write(dbh_locations_sf_buffer, dsn = "bottom_up_detected_stem_locations_buffered.gpkg", append = FALSE, delete_dsn = TRUE, quiet = TRUE)
+  
+  ### Get the total processing time
+  master_end = Sys.time()
+  master_total = difftime(master_end, master_start, units = c("mins"))
+  print(paste0("Total DBH detection took ", master_total, " minutes ... "))
+  
+  ### Compile output statistics 
+  number_trees_found = nrow(dbh_locations_sf)
+  number_tiles_processed = nrow(stem_detection_status_grid)
+  number_tiles_failed = num_files_failed
+  master_dbh_detection_mins = master_total
+  output_stats = cbind(number_tiles_processed, number_tiles_failed, number_trees_found, master_dbh_detection_mins)
+  
+  ### Write output statistics to the disk
+  setwd(config$delivery_stats_dir)
+  write.csv(output_stats, file = "03_dbh_detection_stats.csv")
+  print(paste0("Total stem detection complete ... "))
   
 }
 
+###__________________________###
+
+```
+
+
+---
+
+```{r, eval=F, include=F}
 ### Function to detect stems within normalized tiles
 detect_stems_within_tiles = function(config, dbh_max_size_m){
   
@@ -2011,7 +2464,7 @@ detect_crowns_top_down = function(config, desired_chm_res, window_size, minimum_
   
   ### Read in the chm
   setwd(config$delivery_spatial_dir)
-  desired_chm_name = paste0("master_chm_raster_", desired_chm_res, "m.tif")
+  desired_chm_name = paste0("chm_raster_", desired_chm_res, "m.tif")
   message("Reading in ", desired_chm_name, " ... ")
   input_file_path = paste0(config$delivery_spatial_dir, "/", desired_chm_name)
   input_chm = terra::rast(input_file_path)
@@ -2091,7 +2544,7 @@ detect_crowns_bottom_up = function(config, desired_chm_res, window_size, minimum
   
   ### Read in the chm
   setwd(config$delivery_spatial_dir)
-  desired_chm_name = paste0("master_chm_raster_", desired_chm_res, "m.tif")
+  desired_chm_name = paste0("chm_raster_", desired_chm_res, "m.tif")
   message("Reading in ", desired_chm_name, " ... ")
   input_file_path = paste0(config$delivery_spatial_dir, "/", desired_chm_name)
   input_chm = terra::rast(input_file_path)
@@ -2313,7 +2766,7 @@ detect_final_crowns = function(config, desired_chm_res, window_size, minimum_hei
   
   ### Read in the chm
   setwd(config$delivery_spatial_dir)
-  desired_chm_name = paste0("master_chm_raster_", desired_chm_res, "m.tif")
+  desired_chm_name = paste0("chm_raster_", desired_chm_res, "m.tif")
   message("Reading in ", desired_chm_name, " ... ")
   input_file_path = paste0(config$delivery_spatial_dir, "/", desired_chm_name)
   input_chm = terra::rast(input_file_path)
