@@ -48,11 +48,17 @@ knitr::opts_chunk$set(
   , fig.width = 10
   , fig.height = 7
 )
+# Embed an interactive 3D plot with rgl
+# https://bookdown.org/yihui/rmarkdown-cookbook/rgl-3d.html
+library(rgl)
+knitr::knit_hooks$set(webgl = hook_webgl)
 ```
 
 ## Load packages
 
 Load all packages used in program.
+
+*Note that the `TreeLS` package was removed from CRAN and must be installed from the development version on GitHub by uncommenting the relevant code section below.*
 
 ```{r pkg-load}
 # bread-and-butter
@@ -69,8 +75,11 @@ library(geometry) # mesh generation and surface tessellation
 library(lidR)
 library(ForestTools)
 library(rlas)
-## remotes::install_github('tiagodc/TreeLS')
-## library(TreeLS) # removed from CRAN
+## !! TreeLS package removed from CRAN...
+  ## uncomment to install from github dev repo: https://github.com/tiagodc/TreeLS
+  # library(pak)
+  # pak::pkg_install("tiagodc/TreeLS")
+  library(TreeLS) # removed from CRAN
 # FIA data
 ## devtools::install_github('hunter-stanke/rFIA')
 ## library(rFIA) ## removed from CRAN
@@ -1480,7 +1489,113 @@ gc()
 
 # Detect Stems
 
-```{r detect-stem-fn, include=TRUE, eval=FALSE}
+This process uses the normalized grid tiled `laz` files created in [this section](#classify_points) to detect tree stems using the `TreeLS` package based on methods described in [de Conto et al. (2017)](https://scholar.google.com/scholar?cluster=4008845887457503672&hl=en&as_sdt=0,6). Each normalized grid tile point cloud is individually passed to the `TreeLS::treeMap` function using the `map.hough` algorithm to estimate tree occurrence regions from a normalized point cloud using the Hough Transform for circle search. Good methods for noise filtering are paramount for a robust stem isolation algorithm. There are a handful of methods to remove noise from stem point cloud data; one technique is the Hough transformation technique in which every data point "votes" for a cylinder center ([de Conto et al. (2017)](https://scholar.google.com/scholar?cluster=4008845887457503672&hl=en&as_sdt=0,6)). The specific tree detection function is implemented using the following code:
+
+```{r treemap-ex, include=TRUE, eval=FALSE}
+TreeLS::treeMap(
+  las = las_norm_tile
+  , method = map.hough(
+    # height thresholds applied to filter a point cloud before processing
+    min_h = 1
+    , max_h = 5
+    # height interval to perform point filtering/assignment/classification
+    , h_step = 0.5
+    # pixel side length to discretize the point cloud layers 
+      # while performing the Hough Transform circle search
+    , pixel_size = 0.025
+    # largest tree diameter expected in the point cloud
+    , max_d = 0.75 # 0.75m = 30in
+    # minimum point density (0 to 1) within a pixel evaluated 
+      # on the Hough Transform - i.e. only dense point clousters will undergo circle search
+      # hey google, define "clouster" ?
+    , min_density = 0.0001
+    # minimum number of circle intersections over a pixel 
+      # to assign it as a circle center candidate.
+    , min_votes = 3
+  )
+  # parameter passed down to treeMap.merge (if merge > 0)
+  , merge = 0
+)
+```
+
+After tree detection, the tree coordinates that overlap (or are too close) are merged into a single tree ID using the `TreeLS::treeMap.merge` function. The detected trees are then used to assign tree IDs to the original normalized point cloud based on coordinates extracted from the `TreeLS::treeMap` object via `TreeLS::treePoints(las=las_norm_tile, map=treemap_merge, method = trp.crop(l = 3))`, where the `trp.crop()` algorithm assigns points to a tree ID that are inside a circle of fixed area (i.e. 3m) around the `TreeLS::treeMap` object. 
+
+Lastly, points in the normalized point cloud are classified as stem points and assigned a tree ID using the `TreeLS::stemPoints` function with the algorithm `stm.hough`:
+
+```{r stempt-ex, include=TRUE, eval=FALSE}
+TreeLS::stemPoints(
+  las = las
+  , method = stm.hough(
+    # height interval to perform point filtering/assignment/classification.
+    h_step = 0.5
+    # largest tree diameter expected in the point cloud
+    , max_d = 0.75 # 0.75m = 30in
+    # tree base height interval to initiate circle search
+    , h_base = c(1, 2.5)
+    #  pixel side length to discretize the point cloud layers 
+      # while performing the Hough Transform circle search.
+    , pixel_size = 0.025
+    # minimum point density (0 to 1) within a pixel evaluated 
+      # on the Hough Transform - i.e. only dense point clousters will undergo circle search
+      # hey google, define "clouster" ?
+    , min_density = 0.1
+    # minimum number of circle intersections over a pixel 
+      # to assign it as a circle center candidate.
+    , min_votes = 3
+  )
+)
+```
+
+## Define the stem detection function
+
+```{r detect-stem-fn}
+###_____________________________________________________###
+### Define function to map for potential tree locations ###
+### Using TreeLS::treeMap                               ###
+###_____________________________________________________###
+### Function to map for potential tree locations with error handling
+  tree_map_function <- function(las){
+    result <- tryCatch(
+      expr = {
+        map = TreeLS::treeMap(
+          las = las
+          , method = map.hough(
+            # height thresholds applied to filter a point cloud before processing
+            min_h = 1
+            , max_h = 5
+            # height interval to perform point filtering/assignment/classification
+            , h_step = 0.5
+            # pixel side length to discretize the point cloud layers 
+              # while performing the Hough Transform circle search
+            , pixel_size = 0.025
+            # largest tree diameter expected in the point cloud
+            , max_d = 0.75 # 0.75m = 30in
+            # minimum point density (0 to 1) within a pixel evaluated 
+              # on the Hough Transform - i.e. only dense point clousters will undergo circle search
+              # hey google, define "clouster" ?
+            , min_density = 0.0001
+            # minimum number of circle intersections over a pixel 
+              # to assign it as a circle center candidate.
+            , min_votes = 3
+          )
+          # parameter passed down to treeMap.merge (if merge > 0)
+          , merge = 0
+        )
+      },
+      error = function(e) {
+        message <- paste("Error:", e$message)
+        return(message)
+      }
+    )
+    if (inherits(result, "error")) {
+      return(result)
+    } else {
+      return(result)
+    }
+  }
+```
+
+```{r include=F, eval=FALSE}
 ### Function to detect stems within normalized tiles
 # detect_stems_within_tiles = function(config, dbh_max_size_m){
   # config = config
@@ -1967,6 +2082,134 @@ gc()
 
 ###__________________________###
 
+```
+
+## Example
+
+This is an example of the full process: 
+
+### 1. Read Normalized Point Cloud
+
+```{r detect-stem-st1, webgl=FALSE}
+# read single data tile
+  las_norm_tile_temp = list.files(
+      config$las_norm_tile_dir
+      , pattern = ".*\\.(laz|las)$", full.names = T
+    ) %>% 
+    .[1] %>% 
+    lidR::readLAS() %>% 
+    lidR::filter_duplicates()
+
+# plot(las_norm_tile_temp)
+plot3D::scatter3D(
+  x = las_norm_tile_temp@data$X
+  , y = las_norm_tile_temp@data$Y
+  , z = las_norm_tile_temp@data$Z
+  , colvar = las_norm_tile_temp@data$Z
+  , pch = 19, cex = 0.2
+)
+```
+
+### 2. Detect Stems
+
+```{r detect-stem-st2, webgl=FALSE}
+# test tree detection function
+  treemap_temp = tree_map_function(las_norm_tile_temp)
+  # what is this?
+  # class(treemap_temp)
+  # str(treemap_temp)
+  
+  ## merge TreeIDs which are too close in a treeMap's object.
+  treemap_temp = TreeLS::treeMap.merge(treemap_temp)
+  # str(treemap_temp)
+  # treemap_temp@data$TreeID %>% unique() %>% length()
+
+# plot(treemap_temp, color = "TreeID")
+plot3D::scatter3D(
+  x = treemap_temp@data$X
+  , y = treemap_temp@data$Y
+  , z = treemap_temp@data$Z
+  , colvar = treemap_temp@data$TreeID
+  , col = viridis::viridis(treemap_temp@data$TreeID %>% unique() %>% length())
+  , pch = 19, cex = 0.5
+)
+```
+
+```{r, include=FALSE, eval=FALSE}
+plot3D::scatter3D(
+  x = treemap_temp@data$X
+  , y = treemap_temp@data$Y
+  , z = treemap_temp@data$Z
+  , colvar = treemap_temp@data$TreeID
+  , col = viridis::viridis(treemap_temp@data$TreeID %>% unique() %>% length())
+  , pch = 19, cex = 0.5
+)
+```
+
+### 3. Assign TreeID to Normalized Points
+
+```{r detect-stem-st3, webgl=FALSE}
+### Classify tree regions
+  ## Assigns TreeIDs to a LAS object based on coordinates extracted from a treeMap object.
+  las_norm_tile_temp = las_norm_tile_temp %>% 
+    TreeLS::treePoints(map = treemap_temp, method = trp.crop(l = 3))
+  # las_cls_temp@data %>% dplyr::glimpse()
+  # las_cls_temp@data %>% dplyr::count(TreeID) %>% nrow()
+
+# plot(las_norm_tile_temp, color = "TreeID")
+plot3D::scatter3D(
+  x = las_norm_tile_temp@data$X
+  , y = las_norm_tile_temp@data$Y
+  , z = las_norm_tile_temp@data$Z
+  , colvar = las_norm_tile_temp@data$TreeID
+  , col = viridis::viridis(las_norm_tile_temp@data$TreeID %>% unique() %>% length())
+  , pch = 19, cex = 0.2
+)
+```
+
+### 4. Classify Normalized Points as Stem Points
+
+```{r detect-stem-st4, webgl=FALSE}
+### Classify stem points
+  las_norm_tile_temp = TreeLS::stemPoints(
+    las = las_norm_tile_temp
+    , method = stm.hough(
+      # height interval to perform point filtering/assignment/classification.
+      h_step = 0.5
+      # largest tree diameter expected in the point cloud
+      , max_d = 0.75 # 0.75m = 30in
+      # tree base height interval to initiate circle search
+      , h_base = c(1, 2.5)
+      #  pixel side length to discretize the point cloud layers 
+        # while performing the Hough Transform circle search.
+      , pixel_size = 0.025
+      # minimum point density (0 to 1) within a pixel evaluated 
+        # on the Hough Transform - i.e. only dense point clousters will undergo circle search
+        # hey google, define "clouster" ?
+      , min_density = 0.1
+      # minimum number of circle intersections over a pixel 
+        # to assign it as a circle center candidate.
+      , min_votes = 3
+    )
+  )
+  # las_cls_temp@data %>% dplyr::glimpse()
+  # las_cls_temp@data %>% dplyr::count(Classification)
+  # las_cls_temp@data %>% dplyr::count(Stem)
+  # las_cls_temp@data %>% dplyr::count(TreeID) %>% nrow()
+
+# plot only ground points and stem points
+  # lidR::filter_poi(las_norm_tile_temp, (Stem==TRUE | Classification==2)) %>% 
+  #   plot(color = "Stem")
+# plot only ground points and stem points
+las_norm_tile_temp = lidR::filter_poi(las_norm_tile_temp, (Stem==TRUE | Classification==2))
+plot3D::scatter3D(
+  x = las_norm_tile_temp@data$X
+  , y = las_norm_tile_temp@data$Y
+  , z = las_norm_tile_temp@data$Z
+  , colvar = las_norm_tile_temp@data$Stem
+  , col = viridis::viridis(las_norm_tile_temp@data$Stem %>% unique() %>% length())
+  , pch = 19, cex = 0.4
+)
 ```
 
 
