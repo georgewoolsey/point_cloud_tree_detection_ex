@@ -982,9 +982,9 @@ plot_dtm3d(dtm3)
 ```{r create-dtm-fn}
 # GW added
 # create funtion to read las, rasterize, and return data frame
-las2dtm2df <- function(file_path_name, des_dtm_res = 3) {
+las2dtm2df <- function(las_path_name, des_dtm_res = 3) {
   ### Read in the file
-  las_ground_tile = lidR::readLAS(file_path_name, select = "xyzc")
+  las_ground_tile = lidR::readLAS(las_path_name, select = "xyzc")
   
   ### Create a DEM from the file
   dtm_tile = lidR::rasterize_canopy(
@@ -1197,9 +1197,9 @@ This could result in i) empty cells; and/or ii) a less smooth DTM which is influ
 ```{r create-chm-fn}
 # GW added
 # create funtion to read las, rasterize, and return data frame
-las2chm2df <- function(file_path_name, des_chm_res = 3, min_z = -Inf, max_z = Inf) {
+las2chm2df <- function(las_path_name, des_chm_res = 3, min_z = -Inf, max_z = Inf) {
   ### Read in the file
-  las_norm_tile = lidR::readLAS(file_path_name, select = "xyzc")
+  las_norm_tile = lidR::readLAS(las_path_name, select = "xyzc")
   
   ### Filter the points to within the min and max Z range 
     las_norm_tile = lidR::filter_poi(las_norm_tile, Z > as.numeric(min_z))
@@ -1487,7 +1487,7 @@ remove(list = ls()[grep("_temp",ls())])
 gc()
 ```
 
-# Detect Stems
+# Detect Stems{#detect-stems}
 
 This process uses the normalized grid tiled `laz` files created in [this section](#classify_points) to detect tree stems using the `TreeLS` package based on methods described in [de Conto et al. (2017)](https://scholar.google.com/scholar?cluster=4008845887457503672&hl=en&as_sdt=0,6). Each normalized grid tile point cloud is individually passed to the `TreeLS::treeMap` function using the `map.hough` algorithm to estimate tree occurrence regions from a normalized point cloud using the Hough Transform for circle search. Good methods for noise filtering are paramount for a robust stem isolation algorithm. There are a handful of methods to remove noise from stem point cloud data; one technique is the Hough transformation technique in which every data point "votes" for a cylinder center ([de Conto et al. (2017)](https://scholar.google.com/scholar?cluster=4008845887457503672&hl=en&as_sdt=0,6)). The specific tree detection function is implemented using the following code:
 
@@ -1546,7 +1546,7 @@ TreeLS::stemPoints(
 )
 ```
 
-## Define the stem detection function
+## Define the stem detection function{#detect_stem_fn}
 
 ```{r detect-stem-fn}
 ###_____________________________________________________###
@@ -1595,73 +1595,15 @@ TreeLS::stemPoints(
   }
 ```
 
-```{r include=F, eval=FALSE}
-### Function to detect stems within normalized tiles
-# detect_stems_within_tiles = function(config, dbh_max_size_m){
-  # config = config
-  # , my_des_chm_res = 0.5 #0.07 #in meters
-  # , calculate_extent = F
-  # , my_las_grid = las_grid # generate_grid_over_extent(las_ctg, desired_tile_res)
-  # , my_las_ctg = las_ctg # lidR::readLAScatalog(config$input_las_dir)
-  # , my_min_z = 1.2
-  # , my_max_z= 1.4
-  
-  
-  # define files
-    las_grid = my_las_grid
-    las_ctg = my_las_ctg
-  ###_______________________###
-  ### Configure directories ###
-  ###_______________________###
-  
-  message("Initializing tree stem detection algorithm ... ")
-  master_start = Sys.time()
-  
-  ####____________________________________###
-  ### Get a list of .las files to process ###
-  ###_____________________________________###
-  tile_list = list.files(config$las_norm_tile_dir, pattern = ".*\\.(laz|las)$", full.names = F)
-  # tile_list
-  message("Processing ", length(tile_list), " las files in parallel ... ")
-  
-  ###____________________________________________________________###
-  ### Get the extent of the las directory as a lascatalog object ###
-  ###____________________________________________________________###
-  
-  las_extent = lidR::readALSLAScatalog(config$las_norm_tile_dir)
-  las_extent = las_extent@data
-  # las_extent %>% str()
-  
-  ### select columns from the las extent
-  las_extent = las_extent %>% 
-    dplyr::select(filename, Number.of.point.records) %>% 
-    dplyr::mutate(
-      las_name = basename(filename)
-      , extent_area = sf::st_area(las_extent) %>% as.numeric()
-      , number_points = Number.of.point.records
-    )
-  # las_extent %>% str()
-  
-  ###____________________________________________________###
-  ### Loop through the las files and try to detect stems ###
-  ###____________________________________________________###
-  
-  stem_start = Sys.time()
-  ## !!!!!! TURNED OFF PARALLEL B/C IT KILLS STUFF
-  # cores = parallel::detectCores()
-  # message("Registering parallel session on ", cores-1, " cores ... ")
-  # cluster = parallel::makeCluster(cores-1)
-  # doParallel::registerDoParallel(cluster)
-  # stem_detection_status_grid_list = foreach(
-  #   i = 1:length(tile_list), 
-  #     .packages = c("TreeLS", "sf", "lidR", "ForestTools", "terra", "dplyr", "raster"),
-  #     .errorhandling = "remove",
-  #     .inorder = FALSE
-  # ) %dopar% {
-  ## !!!!!! TURNED OFF PARALLEL B/C IT KILLS STUFF
-                                          
+## Define the Write Stem `laz` function
+
+This function applies the [stem detection function](#detect_stem_fn) to the normalized point cloud to i) assign tree IDs to the points and ii) flag the stem points. The result writes the output to the `r config$las_stem_dir` directory.
+
+```{r write-stem-las-fn}
+# pass this function a file path of the las you wish to detect stems and classify
+write_stem_las_fn <- function(las_path_name) {
     ### Get the desired las file
-    las_name = tile_list[i]
+    las_name = basename(las_path_name)
     # las_name
     
     ### See if the file has been generated
@@ -1670,106 +1612,83 @@ TreeLS::stemPoints(
     # does_file_exist
     
     if(does_file_exist == TRUE){
-      message("stem detect laz for grid number ", i, " already exists guy ... ")
+      message("stem detect laz for grid number ", las_name, " already exists guy ... ")
+      return(FALSE)
     }
     
     ### Read in the desired las file
-    las_path = paste0(config$las_norm_tile_dir, "/", las_name)
-    las_norm_tile = lidR::readLAS(las_path)
+    las_norm_tile = lidR::readLAS(las_path_name)
     las_norm_tile = lidR::filter_duplicates(las_norm_tile)
-    st_crs(las_norm_tile) = st_crs(las_grid)
     # plot(las_norm_tile)
+    
     # get the maximum point height
     max_point_height = max(las_norm_tile@data$Z)
-    ### Filter the extent polygon sf/data.frame for the tile
-    tile_extent = las_extent %>% 
-      dplyr::filter(filename == las_path) %>% 
-      dplyr::mutate(
-        las_area_m2 = extent_area
-        , max_point_height = max_point_height
-      )
-    # tile_extent %>% str()
+    
     ###____________________________________________________________###
-    ### If the max point height is below X feet, return empty tile ###
+    ### If the max point height is below X feet, return classified tile ###
     ###____________________________________________________________###
     
     if(max_point_height < 2){
-      
-      ### Compile extent polygon statistics for failed file
-      
-      ### Append the extent polygon stats to the polygon file
-      tile_extent = tile_extent %>% 
-        dplyr::mutate(
-          stem_detection_status = "no points below 2m"
-          , number_stems_detected = "0"
-          , max_stem_dbh = "0"
-          , mean_stem_dbh = "0"
-        )
-      return(tile_extent)
+        message("No points >2m for grid number ", las_name, " so skipped it ... ")
+        # ### !!!! UNCOMMENT TO WRITE CLASSIFIED LAS INSTEAD WITH NO STEM POINTS
+        # ### Pull out the ground points
+        # ground = filter_poi(las_norm_tile, Classification == 2)
+        # 
+        # ### Pull out the remaining points that arent ground
+        # remaining_points = filter_poi(las_norm_tile, Classification != 2)
+        # remaining_points@data$Classification = 5
+        # 
+        # ### Combine the newly classified data
+        # las_reclassified = rbind(ground, remaining_points)
+        # las_reclassified@data$TreeID = as.numeric(0)
+        # las_reclassified@data$Stem = as.logical(F)
+        # las_reclassified@data$Segment = as.numeric(0)
+        # las_reclassified@data$Radius = as.numeric(0)
+        # las_reclassified@data$Votes = as.numeric(0)
+        # 
+        # ### Write the stem points to the disk
+        # lidR::writeLAS(las_reclassified, paste0(config$las_stem_dir, "/", las_name))
+      return(FALSE)
     }
-    
-    ###_____________________________________________________###
-    ### Define function to map for potential tree locations ###
-    ###_____________________________________________________###
-      
-      ### Function to map for potential tree locations
-      tree_map_function <- function(las){
-        result <- tryCatch(
-          expr = {
-            
-            map = TreeLS::treeMap(las, map.hough(min_h = 1,
-                                                 max_h = 5,
-                                                 h_step = 0.5,
-                                                 pixel_size = 0.025,
-                                                 max_d = 0.6,
-                                                 min_density = 0.0001,
-                                                 min_votes = 3), 0)
-          },
-          error = function(e) {
-            message <- paste("Error:", e$message)
-            return(message)
-          }
-        )
-        
-        if (inherits(result, "error")) {
-          return(result)
-        } else {
-          return(result)
-        }
-      }
-    
     
     ###______________________________________________________________###
     ### If the max point height is above X feet, try to detect stems ###
     ###______________________________________________________________###
     
-    # if(max_point_height > 2){
-      
-      
+    if(max_point_height >= 2){
       
       ### Run the function to search for candidate locations
-      result = tree_map_function(las)
+      treemap_temp = tree_map_function(las_norm_tile)
       
       ### Get a logic check
-      check = class(result)
-      check
+      check = class(treemap_temp)
+      # check
       
       ###_______________________________________________________________###
       ### If the class of the result === Character, then no stems found ###
       ###_______________________________________________________________###
       
       if(check == "character"){
-        
-        ### Compile extent polygon statistics for failed file
-        stem_detection_status = "no stems found"
-        number_stems_detected = 0
-        max_stem_dbh = 0
-        mean_stem_dbh = 0
-        
-        ### Append the extent polygon stats to the polygon file
-        extent = cbind(extent, stem_detection_status, number_stems_detected, max_stem_dbh, mean_stem_dbh)
-        return(extent)
-        
+        message("No stems detected for grid number ", las_name, " so skipped it ... ")
+        # ### !!!! UNCOMMENT TO WRITE CLASSIFIED LAS INSTEAD WITH NO STEM POINTS
+        # ### Pull out the ground points
+        # ground = filter_poi(las_norm_tile, Classification == 2)
+        # 
+        # ### Pull out the remaining points that arent ground
+        # remaining_points = filter_poi(las_norm_tile, Classification != 2)
+        # remaining_points@data$Classification = 5
+        # 
+        # ### Combine the newly classified data
+        # las_reclassified = rbind(ground, remaining_points)
+        # las_reclassified@data$TreeID = as.numeric(0)
+        # las_reclassified@data$Stem = as.logical(F)
+        # las_reclassified@data$Segment = as.numeric(0)
+        # las_reclassified@data$Radius = as.numeric(0)
+        # las_reclassified@data$Votes = as.numeric(0)
+        # 
+        # ### Write the stem points to the disk
+        # lidR::writeLAS(las_reclassified, paste0(config$las_stem_dir, "/", las_name))
+        return(FALSE)
       }
       
       ### If the class of the result == "LAS"
@@ -1780,42 +1699,217 @@ TreeLS::stemPoints(
         ###___________________________________###
         
         ### Merge stems
-        result = TreeLS::treeMap.merge(result)
+        treemap_temp = TreeLS::treeMap.merge(treemap_temp)
         
         ### Classify tree regions
-        las = TreeLS::treePoints(las, result, trp.crop(l = 3))
+        ## Assigns TreeIDs to a LAS object based on coordinates extracted from a treeMap object.
+        las_norm_tile = TreeLS::treePoints(
+          las = las_norm_tile
+          , map = treemap_temp
+          , method = trp.crop(l = 3)
+        )
+        # plot(las_norm_tile, color = "TreeID")
         
         ### Classify stem points
-        las = TreeLS::stemPoints(las, stm.hough(h_step = 0.5,
-                                                max_d = 0.6,
-                                                h_base = c(1, 2.5),
-                                                pixel_size = 0.025,
-                                                min_density = 0.1,
-                                                min_votes = 3))
+        las_norm_tile = TreeLS::stemPoints(
+          las = las_norm_tile
+          , method = stm.hough(
+            # height interval to perform point filtering/assignment/classification.
+            h_step = 0.5
+            # largest tree diameter expected in the point cloud
+            , max_d = 0.75 # 0.75m = 30in
+            # tree base height interval to initiate circle search
+            , h_base = c(1, 2.5)
+            #  pixel side length to discretize the point cloud layers 
+              # while performing the Hough Transform circle search.
+            , pixel_size = 0.025
+            # minimum point density (0 to 1) within a pixel evaluated 
+              # on the Hough Transform - i.e. only dense point clousters will undergo circle search
+              # hey google, define "clouster" ?
+            , min_density = 0.1
+            # minimum number of circle intersections over a pixel 
+              # to assign it as a circle center candidate.
+            , min_votes = 3
+          )
+        )
         
         ###_______________________________________________________###
         ### Set the classification codes of different point types ###
         ###_______________________________________________________###
         
         ### Pull out the stem files
-        stem_points = lidR::filter_poi(las, Stem == TRUE)
+        stem_points = lidR::filter_poi(las_norm_tile, Stem == TRUE)
         stem_points@data$Classification = 4
         
         ### Pull out the ground points
-        ground = filter_poi(las, Classification == 2)
+        ground = filter_poi(las_norm_tile, Classification == 2)
         
         ### Pull out the remaining points that arent ground
-        remaining_points = filter_poi(las, Stem == FALSE)
+        remaining_points = filter_poi(las_norm_tile, Stem == FALSE)
         remaining_points@data$Classification = 5
         
         ### Combine the newly classified data
         las_reclassified = rbind(stem_points, ground, remaining_points)
+        # str(las_reclassified)
+        # class(las_reclassified)
+        # plot(las_reclassified, color = "Classification")
         
         ### Write the stem points to the disk
-        setwd(config$las_stem_dir)
-        lidR::writeLAS(las_reclassified, las_name)
-        
-        ###_______________________________________________________###
+        lidR::writeLAS(las_reclassified, paste0(config$las_stem_dir, "/", las_name))
+        message("Wrote stem detect laz for grid number ", las_name, " successfully ... ")
+        # return(las_norm_tile)
+        return(TRUE)
+      }
+    }
+}
+# test the function
+# list.files(config$las_norm_tile_dir, pattern = ".*\\.(laz|las)$", full.names = T) %>% 
+#   .[1:3] %>% 
+#   purrr::map(write_stem_las_fn)
+```
+
+Call the function to write the stem classified point clouds to the disk
+
+```{r call-detect-stems, message=FALSE, warning=FALSE}
+# map over the normalized point cloud tiles
+  list.files(config$las_norm_tile_dir, pattern = ".*\\.(laz|las)$", full.names = T) %>%
+    purrr::map(write_stem_las_fn)
+```
+
+## Example of Detect Stems Steps
+
+This is an example of the full process: 
+
+### 1. Read Normalized Point Cloud
+
+```{r detect-stem-st1, webgl=FALSE}
+# read single data tile
+  las_norm_tile_temp = list.files(
+      config$las_norm_tile_dir
+      , pattern = ".*\\.(laz|las)$", full.names = T
+    ) %>% 
+    .[1] %>% 
+    lidR::readLAS() %>% 
+    lidR::filter_duplicates()
+
+# plot(las_norm_tile_temp)
+plot3D::scatter3D(
+  x = las_norm_tile_temp@data$X
+  , y = las_norm_tile_temp@data$Y
+  , z = las_norm_tile_temp@data$Z
+  , colvar = las_norm_tile_temp@data$Z
+  , pch = 19, cex = 0.2
+)
+```
+
+### 2. Detect Stems
+
+```{r detect-stem-st2, webgl=FALSE}
+# test tree detection function
+  treemap_temp = tree_map_function(las_norm_tile_temp)
+  # what is this?
+  # class(treemap_temp)
+  # str(treemap_temp)
+  
+  ## merge TreeIDs which are too close in a treeMap's object.
+  treemap_temp = TreeLS::treeMap.merge(treemap_temp)
+  # str(treemap_temp)
+  # treemap_temp@data$TreeID %>% unique() %>% length()
+
+# plot(treemap_temp, color = "TreeID")
+plot3D::scatter3D(
+  x = treemap_temp@data$X
+  , y = treemap_temp@data$Y
+  , z = treemap_temp@data$Z
+  , colvar = treemap_temp@data$TreeID
+  , col = viridis::viridis(treemap_temp@data$TreeID %>% unique() %>% length())
+  , pch = 19, cex = 0.5
+)
+```
+
+```{r, include=FALSE, eval=FALSE}
+plot3D::scatter3D(
+  x = treemap_temp@data$X
+  , y = treemap_temp@data$Y
+  , z = treemap_temp@data$Z
+  , colvar = treemap_temp@data$TreeID
+  , col = viridis::viridis(treemap_temp@data$TreeID %>% unique() %>% length())
+  , pch = 19, cex = 0.5
+)
+```
+
+### 3. Assign TreeID to Normalized Points
+
+```{r detect-stem-st3, webgl=FALSE}
+### Classify tree regions
+  ## Assigns TreeIDs to a LAS object based on coordinates extracted from a treeMap object.
+  las_norm_tile_temp = las_norm_tile_temp %>% 
+    TreeLS::treePoints(map = treemap_temp, method = trp.crop(l = 3))
+  # las_cls_temp@data %>% dplyr::glimpse()
+  # las_cls_temp@data %>% dplyr::count(TreeID) %>% nrow()
+
+# plot(las_norm_tile_temp, color = "TreeID")
+plot3D::scatter3D(
+  x = las_norm_tile_temp@data$X
+  , y = las_norm_tile_temp@data$Y
+  , z = las_norm_tile_temp@data$Z
+  , colvar = las_norm_tile_temp@data$TreeID
+  , col = viridis::viridis(las_norm_tile_temp@data$TreeID %>% unique() %>% length())
+  , pch = 19, cex = 0.2
+)
+```
+
+### 4. Classify Normalized Points as Stem Points
+
+```{r detect-stem-st4, webgl=FALSE}
+### Classify stem points
+  las_norm_tile_temp = TreeLS::stemPoints(
+    las = las_norm_tile_temp
+    , method = stm.hough(
+      # height interval to perform point filtering/assignment/classification.
+      h_step = 0.5
+      # largest tree diameter expected in the point cloud
+      , max_d = 0.75 # 0.75m = 30in
+      # tree base height interval to initiate circle search
+      , h_base = c(1, 2.5)
+      #  pixel side length to discretize the point cloud layers 
+        # while performing the Hough Transform circle search.
+      , pixel_size = 0.025
+      # minimum point density (0 to 1) within a pixel evaluated 
+        # on the Hough Transform - i.e. only dense point clousters will undergo circle search
+        # hey google, define "clouster" ?
+      , min_density = 0.1
+      # minimum number of circle intersections over a pixel 
+        # to assign it as a circle center candidate.
+      , min_votes = 3
+    )
+  )
+  # las_cls_temp@data %>% dplyr::glimpse()
+  # las_cls_temp@data %>% dplyr::count(Classification)
+  # las_cls_temp@data %>% dplyr::count(Stem)
+  # las_cls_temp@data %>% dplyr::count(TreeID) %>% nrow()
+
+# plot only ground points and stem points
+  # lidR::filter_poi(las_norm_tile_temp, (Stem==TRUE | Classification==2)) %>% 
+  #   plot(color = "Stem")
+# plot only ground points and stem points
+las_norm_tile_temp = lidR::filter_poi(las_norm_tile_temp, (Stem==TRUE | Classification==2))
+plot3D::scatter3D(
+  x = las_norm_tile_temp@data$X
+  , y = las_norm_tile_temp@data$Y
+  , z = las_norm_tile_temp@data$Z
+  , colvar = las_norm_tile_temp@data$Stem
+  , col = viridis::viridis(las_norm_tile_temp@data$Stem %>% unique() %>% length())
+  , pch = 19, cex = 0.4
+)
+```
+
+# DBH Estimates{#est_dbh}
+
+This section uses the normalized point cloud created in the [Detect Stem section](#detect-stems) with points assigned to a tree ID (where a stem was detected) and points classified as stems to estimate the DBH.
+
+```{r  include=F, eval=FALSE}
+###_______________________________________________________###
         ### GET THE STEM CYLINDER MEASUREMENTS AND STEM INVENTORY ###
         ###_______________________________________________________###
         
@@ -2083,135 +2177,6 @@ TreeLS::stemPoints(
 ###__________________________###
 
 ```
-
-## Example
-
-This is an example of the full process: 
-
-### 1. Read Normalized Point Cloud
-
-```{r detect-stem-st1, webgl=FALSE}
-# read single data tile
-  las_norm_tile_temp = list.files(
-      config$las_norm_tile_dir
-      , pattern = ".*\\.(laz|las)$", full.names = T
-    ) %>% 
-    .[1] %>% 
-    lidR::readLAS() %>% 
-    lidR::filter_duplicates()
-
-# plot(las_norm_tile_temp)
-plot3D::scatter3D(
-  x = las_norm_tile_temp@data$X
-  , y = las_norm_tile_temp@data$Y
-  , z = las_norm_tile_temp@data$Z
-  , colvar = las_norm_tile_temp@data$Z
-  , pch = 19, cex = 0.2
-)
-```
-
-### 2. Detect Stems
-
-```{r detect-stem-st2, webgl=FALSE}
-# test tree detection function
-  treemap_temp = tree_map_function(las_norm_tile_temp)
-  # what is this?
-  # class(treemap_temp)
-  # str(treemap_temp)
-  
-  ## merge TreeIDs which are too close in a treeMap's object.
-  treemap_temp = TreeLS::treeMap.merge(treemap_temp)
-  # str(treemap_temp)
-  # treemap_temp@data$TreeID %>% unique() %>% length()
-
-# plot(treemap_temp, color = "TreeID")
-plot3D::scatter3D(
-  x = treemap_temp@data$X
-  , y = treemap_temp@data$Y
-  , z = treemap_temp@data$Z
-  , colvar = treemap_temp@data$TreeID
-  , col = viridis::viridis(treemap_temp@data$TreeID %>% unique() %>% length())
-  , pch = 19, cex = 0.5
-)
-```
-
-```{r, include=FALSE, eval=FALSE}
-plot3D::scatter3D(
-  x = treemap_temp@data$X
-  , y = treemap_temp@data$Y
-  , z = treemap_temp@data$Z
-  , colvar = treemap_temp@data$TreeID
-  , col = viridis::viridis(treemap_temp@data$TreeID %>% unique() %>% length())
-  , pch = 19, cex = 0.5
-)
-```
-
-### 3. Assign TreeID to Normalized Points
-
-```{r detect-stem-st3, webgl=FALSE}
-### Classify tree regions
-  ## Assigns TreeIDs to a LAS object based on coordinates extracted from a treeMap object.
-  las_norm_tile_temp = las_norm_tile_temp %>% 
-    TreeLS::treePoints(map = treemap_temp, method = trp.crop(l = 3))
-  # las_cls_temp@data %>% dplyr::glimpse()
-  # las_cls_temp@data %>% dplyr::count(TreeID) %>% nrow()
-
-# plot(las_norm_tile_temp, color = "TreeID")
-plot3D::scatter3D(
-  x = las_norm_tile_temp@data$X
-  , y = las_norm_tile_temp@data$Y
-  , z = las_norm_tile_temp@data$Z
-  , colvar = las_norm_tile_temp@data$TreeID
-  , col = viridis::viridis(las_norm_tile_temp@data$TreeID %>% unique() %>% length())
-  , pch = 19, cex = 0.2
-)
-```
-
-### 4. Classify Normalized Points as Stem Points
-
-```{r detect-stem-st4, webgl=FALSE}
-### Classify stem points
-  las_norm_tile_temp = TreeLS::stemPoints(
-    las = las_norm_tile_temp
-    , method = stm.hough(
-      # height interval to perform point filtering/assignment/classification.
-      h_step = 0.5
-      # largest tree diameter expected in the point cloud
-      , max_d = 0.75 # 0.75m = 30in
-      # tree base height interval to initiate circle search
-      , h_base = c(1, 2.5)
-      #  pixel side length to discretize the point cloud layers 
-        # while performing the Hough Transform circle search.
-      , pixel_size = 0.025
-      # minimum point density (0 to 1) within a pixel evaluated 
-        # on the Hough Transform - i.e. only dense point clousters will undergo circle search
-        # hey google, define "clouster" ?
-      , min_density = 0.1
-      # minimum number of circle intersections over a pixel 
-        # to assign it as a circle center candidate.
-      , min_votes = 3
-    )
-  )
-  # las_cls_temp@data %>% dplyr::glimpse()
-  # las_cls_temp@data %>% dplyr::count(Classification)
-  # las_cls_temp@data %>% dplyr::count(Stem)
-  # las_cls_temp@data %>% dplyr::count(TreeID) %>% nrow()
-
-# plot only ground points and stem points
-  # lidR::filter_poi(las_norm_tile_temp, (Stem==TRUE | Classification==2)) %>% 
-  #   plot(color = "Stem")
-# plot only ground points and stem points
-las_norm_tile_temp = lidR::filter_poi(las_norm_tile_temp, (Stem==TRUE | Classification==2))
-plot3D::scatter3D(
-  x = las_norm_tile_temp@data$X
-  , y = las_norm_tile_temp@data$Y
-  , z = las_norm_tile_temp@data$Z
-  , colvar = las_norm_tile_temp@data$Stem
-  , col = viridis::viridis(las_norm_tile_temp@data$Stem %>% unique() %>% length())
-  , pch = 19, cex = 0.4
-)
-```
-
 
 ---
 
