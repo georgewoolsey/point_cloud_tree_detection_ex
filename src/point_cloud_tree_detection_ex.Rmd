@@ -1770,7 +1770,7 @@ write_stem_las_fn <- function(las_path_name) {
 
 Call the function to write the stem classified point clouds to the disk
 
-```{r call-detect-stems, message=FALSE, warning=FALSE}
+```{r call-detect-stems, message=FALSE, warning=FALSE, results='hide'}
 # map over the normalized point cloud tiles
   list.files(config$las_norm_tile_dir, pattern = ".*\\.(laz|las)$", full.names = T) %>%
     purrr::map(write_stem_las_fn)
