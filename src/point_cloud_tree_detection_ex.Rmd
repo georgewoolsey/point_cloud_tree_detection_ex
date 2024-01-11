@@ -1489,7 +1489,9 @@ gc()
 
 # Detect Stems{#detect-stems}
 
-This process uses the normalized grid tiled `laz` files created in [this section](#classify_points) to detect tree stems using the `TreeLS` package based on methods described in [de Conto et al. (2017)](https://scholar.google.com/scholar?cluster=4008845887457503672&hl=en&as_sdt=0,6). Each normalized grid tile point cloud is individually passed to the `TreeLS::treeMap` function using the `map.hough` algorithm to estimate tree occurrence regions from a normalized point cloud using the Hough Transform for circle search. Good methods for noise filtering are paramount for a robust stem isolation algorithm. There are a handful of methods to remove noise from stem point cloud data; one technique is the Hough transformation technique in which every data point "votes" for a cylinder center ([de Conto et al. (2017)](https://scholar.google.com/scholar?cluster=4008845887457503672&hl=en&as_sdt=0,6)). The specific tree detection function is implemented using the following code:
+This process uses the normalized grid tiled `laz` files created in [this section](#classify_points) to detect tree stems using the `TreeLS` package based on methods described in [de Conto et al. (2017)](https://scholar.google.com/scholar?cluster=4008845887457503672&hl=en&as_sdt=0,6). This section (and the coded functions included within) which relies on the `TreeLS` package requires that data be stored within the R environment until all steps reliant on `TreeLS` functions are completed. Writing out `laz` files (i.e. for later `TreeLS` processing) strips all information that is required for further processing using `TreeLS`. It may be possible to save a `csv` file with the required `TreeLS` attributes alongside the `laz` file and then combine these data during later processing with the `TreeLS` package but the authors have not tested this.
+
+Each normalized grid tile point cloud is individually passed to the `TreeLS::treeMap` function using the `map.hough` algorithm to estimate tree occurrence regions from a normalized point cloud using the Hough Transform for circle search. Good methods for noise filtering are paramount for a robust stem isolation algorithm. There are a handful of methods to remove noise from stem point cloud data; one technique is the Hough transformation technique in which every data point "votes" for a cylinder center ([de Conto et al. (2017)](https://scholar.google.com/scholar?cluster=4008845887457503672&hl=en&as_sdt=0,6)). The specific tree detection function is implemented using the following code:
 
 ```{r treemap-ex, include=TRUE, eval=FALSE}
 TreeLS::treeMap(
@@ -1520,7 +1522,7 @@ TreeLS::treeMap(
 
 After tree detection, the tree coordinates that overlap (or are too close) are merged into a single tree ID using the `TreeLS::treeMap.merge` function. The detected trees are then used to assign tree IDs to the original normalized point cloud based on coordinates extracted from the `TreeLS::treeMap` object via `TreeLS::treePoints(las=las_norm_tile, map=treemap_merge, method = trp.crop(l = 3))`, where the `trp.crop()` algorithm assigns points to a tree ID that are inside a circle of fixed area (i.e. 3m) around the `TreeLS::treeMap` object. 
 
-Lastly, points in the normalized point cloud are classified as stem points and assigned a tree ID using the `TreeLS::stemPoints` function with the algorithm `stm.hough`:
+In the next step, points in the normalized point cloud are classified as stem points and assigned a tree ID using the `TreeLS::stemPoints` function with the algorithm `stm.hough`:
 
 ```{r stempt-ex, include=TRUE, eval=FALSE}
 TreeLS::stemPoints(
@@ -1545,6 +1547,30 @@ TreeLS::stemPoints(
   )
 )
 ```
+
+Lastly, the normalized point cloud with points assigned to a tree ID (where a stem was detected) and points classified as stems is used to estimate the DBH.
+
+DBH estimation is done using the `TreeLS::tlsInventory` function with using a 2D circle fitting algorithm (i.e. `ransac`). The specific function call used is: 
+
+```{r ex-dbh-fit, include=TRUE, eval=FALSE}
+TreeLS::tlsInventory(
+  las = las
+  # height layer (above ground) to estimate stem diameters, in point cloud units
+  , dh = 1.37
+  # height layer width, in point cloud units
+  , dw = 0.2
+  # parameterized shapeFit function, i.e. method to use for diameter estimation.
+  , d_method = shapeFit(
+    # either "circle" or "cylinder".
+    shape = "circle"
+    # optimization method for estimating the shape's parameters
+    , algorithm = "ransac"
+    # number of points selected on every RANSAC iteration.
+    , n = 20
+  )
+)
+```
+
 
 ## Define the stem detection function{#detect_stem_fn}
 
@@ -1595,24 +1621,36 @@ TreeLS::stemPoints(
   }
 ```
 
-## Define the Write Stem `laz` function
+## Define the write stem function
 
-This function applies the [stem detection function](#detect_stem_fn) to the normalized point cloud to i) assign tree IDs to the points and ii) flag the stem points. The result writes the output to the `r config$las_stem_dir` directory.
+This function combines `TreeLS` processing to the normalized point cloud to: 
+
+1) Apply the `TreeLS::treeMap` [stem detection function](#detect_stem_fn)
+2) Merge overlapping tree coordinates using `TreeLS::treeMap.merge`
+3) Assign tree IDs to the original points using `TreeLS::treePoints`
+4) Flag only the stem points using `TreeLS::stemPoints`
+5) DBH estimation is done using `TreeLS::tlsInventory`
+
+The result writes i) a `laz` to the `r config$las_stem_dir` directory with the `Classification` data updated to: ground points (class 2); water points (class 9); stem points (class 4); non-stem (class 5). Also written is a `parquet` file with the tree identification stem locations, heights, and DBH estimates.
 
 ```{r write-stem-las-fn}
-# pass this function a file path of the las you wish to detect stems and classify
+# pass this function a file path of the normalized las you wish to detect stems and classify
 write_stem_las_fn <- function(las_path_name) {
     ### Get the desired las file
     las_name = basename(las_path_name)
     # las_name
     
-    ### See if the file has been generated
+    ### See if the las file has been generated
     path_to_check = paste0(config$las_stem_dir, "/", las_name)
     does_file_exist = file.exists(path_to_check)
     # does_file_exist
+    ### See if the vector file has been generated
+    path_to_check = paste0(config$stem_poly_tile_dir, "/", tools::file_path_sans_ext(las_name), ".parquet")
+    does_file_exist2 = file.exists(path_to_check)
+    # does_file_exist2
     
-    if(does_file_exist == TRUE){
-      message("stem detect laz for grid number ", las_name, " already exists guy ... ")
+    if(does_file_exist == TRUE & does_file_exist2 == TRUE){
+      message("stem detect for grid number ", las_name, " already exists guy ... ")
       return(FALSE)
     }
     
@@ -1656,7 +1694,9 @@ write_stem_las_fn <- function(las_path_name) {
     ###______________________________________________________________###
     
     if(max_point_height >= 2){
-      
+      ###______________________________________________________________###
+      ### 1) Apply the `TreeLS::treeMap` [stem detection function](#detect_stem_fn)
+      ###______________________________________________________________###
       ### Run the function to search for candidate locations
       treemap_temp = tree_map_function(las_norm_tile)
       
@@ -1670,24 +1710,6 @@ write_stem_las_fn <- function(las_path_name) {
       
       if(check == "character"){
         message("No stems detected for grid number ", las_name, " so skipped it ... ")
-        # ### !!!! UNCOMMENT TO WRITE CLASSIFIED LAS INSTEAD WITH NO STEM POINTS
-        # ### Pull out the ground points
-        # ground = filter_poi(las_norm_tile, Classification == 2)
-        # 
-        # ### Pull out the remaining points that arent ground
-        # remaining_points = filter_poi(las_norm_tile, Classification != 2)
-        # remaining_points@data$Classification = 5
-        # 
-        # ### Combine the newly classified data
-        # las_reclassified = rbind(ground, remaining_points)
-        # las_reclassified@data$TreeID = as.numeric(0)
-        # las_reclassified@data$Stem = as.logical(F)
-        # las_reclassified@data$Segment = as.numeric(0)
-        # las_reclassified@data$Radius = as.numeric(0)
-        # las_reclassified@data$Votes = as.numeric(0)
-        # 
-        # ### Write the stem points to the disk
-        # lidR::writeLAS(las_reclassified, paste0(config$las_stem_dir, "/", las_name))
         return(FALSE)
       }
       
@@ -1698,9 +1720,14 @@ write_stem_las_fn <- function(las_path_name) {
         ### Classify the tree and stem points ###
         ###___________________________________###
         
-        ### Merge stems
+        ###______________________________________________________________###
+        ### 2) Merge overlapping tree coordinates using `TreeLS::treeMap.merge`
+        ###______________________________________________________________###
         treemap_temp = TreeLS::treeMap.merge(treemap_temp)
         
+        ###______________________________________________________________###
+        ### 3) Assign tree IDs to the original points using `TreeLS::treePoints`
+        ###______________________________________________________________###
         ### Classify tree regions
         ## Assigns TreeIDs to a LAS object based on coordinates extracted from a treeMap object.
         las_norm_tile = TreeLS::treePoints(
@@ -1710,6 +1737,9 @@ write_stem_las_fn <- function(las_path_name) {
         )
         # plot(las_norm_tile, color = "TreeID")
         
+        ###______________________________________________________________###
+        ### 4) Flag only the stem points using `TreeLS::stemPoints`
+        ###______________________________________________________________###
         ### Classify stem points
         las_norm_tile = TreeLS::stemPoints(
           las = las_norm_tile
@@ -1733,6 +1763,63 @@ write_stem_las_fn <- function(las_path_name) {
           )
         )
         
+        ###______________________________________________________________###
+        ### 5) DBH estimation is done using `TreeLS::tlsInventory`
+        ###______________________________________________________________###
+        ### Search through tree points and estimate DBH to return a data frame of results
+          tree_inv_df = TreeLS::tlsInventory(
+            las = las_norm_tile
+            # height layer (above ground) to estimate stem diameters, in point cloud units
+            , dh = 1.37
+            # height layer width, in point cloud units
+            , dw = 0.2
+            # parameterized shapeFit function, i.e. method to use for diameter estimation.
+            , d_method = shapeFit(
+              # either "circle" or "cylinder".
+              shape = "circle"
+              # optimization method for estimating the shape's parameters
+              , algorithm = "ransac"
+              # number of points selected on every RANSAC iteration.
+              , n = 20
+            )
+          )
+          # class(tree_inv_df)
+          # tree_inv_df %>% dplyr::glimpse()
+        ###_______________________________________________________###
+        ### clean up the DBH stem data frame ###
+        ###_______________________________________________________###
+          # add details to table and convert to sf data
+          tree_inv_df = tree_inv_df %>% 
+            dplyr::mutate(
+              Radius = as.numeric(Radius)
+              , dbh_m = Radius*2
+              , dbh_cm = dbh_m*100
+              , basal_area_m2 = pi * (Radius)^2
+              , basal_area_ft2 = basal_area_m2 * 10.764
+              , treeID = paste0(X, "_", Y)
+              , stem_x = X
+              , stem_y = Y
+            ) %>% 
+            sf::st_as_sf(coords = c("X", "Y"), crs = sf::st_crs(las_norm_tile)) %>% 
+            dplyr::select(
+              treeID, H, , stem_x, stem_y, Radius, Error
+              , dbh_m, dbh_cm, basal_area_m2, basal_area_ft2
+            ) %>% 
+            dplyr::rename(
+              tree_height_m = H
+              , radius_m = Radius
+              , radius_error_m = Error
+            )
+          # tree_inv_df %>% dplyr::glimpse()
+          
+          ### Remove points outside the bounding box of the laz tile + 1m buffer
+          tree_inv_df = tree_inv_df %>% 
+            sf::st_crop(
+              sf::st_bbox(las_norm_tile) %>% 
+                sf::st_as_sfc() %>% 
+                sf::st_buffer(1)
+            )
+        
         ###_______________________________________________________###
         ### Set the classification codes of different point types ###
         ###_______________________________________________________###
@@ -1742,10 +1829,10 @@ write_stem_las_fn <- function(las_path_name) {
         stem_points@data$Classification = 4
         
         ### Pull out the ground points
-        ground = filter_poi(las_norm_tile, Classification == 2)
+        ground = filter_poi(las_norm_tile, Classification %in% c(2,9))
         
         ### Pull out the remaining points that arent ground
-        remaining_points = filter_poi(las_norm_tile, Stem == FALSE)
+        remaining_points = filter_poi(las_norm_tile, Stem == FALSE & !(Classification %in% c(2,9)))
         remaining_points@data$Classification = 5
         
         ### Combine the newly classified data
@@ -1754,17 +1841,26 @@ write_stem_las_fn <- function(las_path_name) {
         # class(las_reclassified)
         # plot(las_reclassified, color = "Classification")
         
+        ###_______________________________________________________###
+        ### Write output to disk ###
+        ###_______________________________________________________###
         ### Write the stem points to the disk
         lidR::writeLAS(las_reclassified, paste0(config$las_stem_dir, "/", las_name))
         message("Wrote stem detect laz for grid number ", las_name, " successfully ... ")
+        ### Write stem polygons to the disk
+        out_name = tools::file_path_sans_ext(las_name)
+        out_name = paste0(config$stem_poly_tile_dir, "/", out_name, ".parquet")
+        sfarrow::st_write_parquet(tree_inv_df, out_name)
+        message("Wrote stem detect vector data for grid number ", las_name, " successfully ... ")
+        
         # return(las_norm_tile)
         return(TRUE)
       }
     }
 }
-# test the function
-# list.files(config$las_norm_tile_dir, pattern = ".*\\.(laz|las)$", full.names = T) %>% 
-#   .[1:3] %>% 
+# ### test the function
+# list.files(config$las_norm_tile_dir, pattern = ".*\\.(laz|las)$", full.names = T) %>%
+#   .[1:2] %>%
 #   purrr::map(write_stem_las_fn)
 ```
 
@@ -1782,7 +1878,7 @@ This is an example of the full process:
 
 ### 1. Read Normalized Point Cloud
 
-```{r detect-stem-st1, webgl=FALSE}
+```{r detect-stem-st1, webgl=FALSE, eval=F}
 # read single data tile
   las_norm_tile_temp = list.files(
       config$las_norm_tile_dir
@@ -1804,8 +1900,9 @@ plot3D::scatter3D(
 
 ### 2. Detect Stems
 
-```{r detect-stem-st2, webgl=FALSE}
-# test tree detection function
+```{r detect-stem-st2, webgl=FALSE, eval=F}
+# implement the tree detection function
+# this function is essentially TreeLS::treeMap(las, method = map.hough(...))
   treemap_temp = tree_map_function(las_norm_tile_temp)
   # what is this?
   # class(treemap_temp)
@@ -1840,7 +1937,7 @@ plot3D::scatter3D(
 
 ### 3. Assign TreeID to Normalized Points
 
-```{r detect-stem-st3, webgl=FALSE}
+```{r detect-stem-st3, webgl=FALSE, eval=F}
 ### Classify tree regions
   ## Assigns TreeIDs to a LAS object based on coordinates extracted from a treeMap object.
   las_norm_tile_temp = las_norm_tile_temp %>% 
@@ -1861,7 +1958,7 @@ plot3D::scatter3D(
 
 ### 4. Classify Normalized Points as Stem Points
 
-```{r detect-stem-st4, webgl=FALSE}
+```{r detect-stem-st4, webgl=FALSE, eval=F}
 ### Classify stem points
   las_norm_tile_temp = TreeLS::stemPoints(
     las = las_norm_tile_temp
@@ -1884,45 +1981,161 @@ plot3D::scatter3D(
       , min_votes = 3
     )
   )
-  # las_cls_temp@data %>% dplyr::glimpse()
-  # las_cls_temp@data %>% dplyr::count(Classification)
-  # las_cls_temp@data %>% dplyr::count(Stem)
-  # las_cls_temp@data %>% dplyr::count(TreeID) %>% nrow()
-
+  # las_norm_tile_temp@data %>% dplyr::glimpse()
+  # las_norm_tile_temp@data %>% dplyr::count(Classification)
+  # las_norm_tile_temp@data %>% dplyr::count(Stem)
+  # las_norm_tile_temp@data %>% dplyr::count(TreeID) %>% nrow()
 # plot only ground points and stem points
-  # lidR::filter_poi(las_norm_tile_temp, (Stem==TRUE | Classification==2)) %>% 
+  # lidR::filter_poi(las_norm_tile_temp, (Stem==TRUE | Classification==2)) %>%
   #   plot(color = "Stem")
 # plot only ground points and stem points
-las_norm_tile_temp = lidR::filter_poi(las_norm_tile_temp, (Stem==TRUE | Classification==2))
+plt_las_norm_tile_temp = lidR::filter_poi(las_norm_tile_temp, (Stem==TRUE | Classification==2))
 plot3D::scatter3D(
-  x = las_norm_tile_temp@data$X
-  , y = las_norm_tile_temp@data$Y
-  , z = las_norm_tile_temp@data$Z
-  , colvar = las_norm_tile_temp@data$Stem
-  , col = viridis::viridis(las_norm_tile_temp@data$Stem %>% unique() %>% length())
+  x = plt_las_norm_tile_temp@data$X
+  , y = plt_las_norm_tile_temp@data$Y
+  , z = plt_las_norm_tile_temp@data$Z
+  , colvar = plt_las_norm_tile_temp@data$Stem
+  , col = viridis::viridis(plt_las_norm_tile_temp@data$Stem %>% unique() %>% length())
   , pch = 19, cex = 0.4
 )
 ```
 
+### 5. Estimate DBH from the Stem Points
+
+```{r detect-stem-st5, webgl=FALSE, eval=F}
+### Search through tree points and estimate DBH to return a data frame of results
+  tree_inv_temp = TreeLS::tlsInventory(
+    las = las_norm_tile_temp
+    # height layer (above ground) to estimate stem diameters, in point cloud units
+    , dh = 1.37
+    # height layer width, in point cloud units
+    , dw = 0.2
+    # parameterized shapeFit function, i.e. method to use for diameter estimation.
+    , d_method = shapeFit(
+      # either "circle" or "cylinder".
+      shape = "circle"
+      # optimization method for estimating the shape's parameters
+      , algorithm = "ransac"
+      # number of points selected on every RANSAC iteration.
+      , n = 20
+    )
+  )
+  # class(tree_inv_temp)
+  # tree_inv_temp %>% dplyr::glimpse()
+  
+  # add details to table and convert to sf data
+  tree_inv_temp = tree_inv_temp %>% 
+    dplyr::mutate(
+      Radius = as.numeric(Radius)
+      , dbh_m = Radius*2
+      , dbh_cm = dbh_m*100
+      , basal_area_m2 = pi * (Radius)^2
+      , basal_area_ft2 = basal_area_m2 * 10.764
+      , treeID = paste0(X, "_", Y)
+      , stem_x = X
+      , stem_y = Y
+    ) %>% 
+    sf::st_as_sf(coords = c("X", "Y"), crs = sf::st_crs(las_norm_tile_temp)) %>% 
+    dplyr::select(
+      treeID, H, , stem_x, stem_y, Radius, Error
+      , dbh_m, dbh_cm, basal_area_m2, basal_area_ft2
+    ) %>% 
+    dplyr::rename(
+      tree_height_m = H
+      , radius_m = Radius
+      , radius_error_m = Error
+    )
+  # tree_inv_temp %>% dplyr::glimpse()
+  
+  ### Remove points outside the bounding box of the laz tile + 1m buffer
+  tree_inv_temp = tree_inv_temp %>% 
+    sf::st_crop(
+      sf::st_bbox(las_norm_tile_temp) %>% 
+        sf::st_as_sfc() %>% 
+        sf::st_buffer(1)
+    )
+  
+  ### plot
+  ggplot() + 
+    geom_sf(
+      data = sf::st_bbox(las_norm_tile_temp) %>% 
+        sf::st_as_sfc() %>% 
+        sf::st_buffer(1)
+      , lwd = 1.5
+      , alpha = 0
+    ) +
+    geom_sf(
+      data = tree_inv_temp
+      , mapping = aes(size=dbh_m, color=dbh_m)
+    ) + 
+    scale_color_viridis_c(option="mako",direction = -1) +
+    theme_light()
+```
+
+
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE, include=FALSE}
+remove(list = ls()[grep("_temp",ls())])
+gc()
+```
+
 # DBH Estimates{#est_dbh}
 
-This section uses the normalized point cloud created in the [Detect Stem section](#detect-stems) with points assigned to a tree ID (where a stem was detected) and points classified as stems to estimate the DBH.
+
 
 ```{r  include=F, eval=FALSE}
-###_______________________________________________________###
-        ### GET THE STEM CYLINDER MEASUREMENTS AND STEM INVENTORY ###
-        ###_______________________________________________________###
+###_____________________________________________________###
+### Define function to map for potential tree locations ###
+### Using TreeLS::treeMap                               ###
+###_____________________________________________________###
+# pass this function a file path of the normalized las with stems classified (i.e. TreeID and Stem columns present)
+las_path_name = list.files(config$las_stem_dir, pattern = ".*\\.(laz|las)$", full.names = T)[1]
+# write_stem_las_fn <- function(las_path_name) {
+    ### Get the desired las file
+    las_name = basename(las_path_name)
+    tile_name = stringr::word(las_name, start = 1, sep = "\\.")
+    
+    ### See if the file has been generated
+    path_to_check = paste0(config$stem_poly_tile_dir, "/", tile_name, ".parquet")
+    does_file_exist = file.exists(path_to_check)
+    # does_file_exist
+    
+    if(does_file_exist == TRUE){
+      message("stem DBH polygon for grid number ", las_name, " already exists guy ... ")
+      return(FALSE)
+    }
+    
+    ### Read in the desired las file
+    las_stem_tile = lidR::readLAS(las_path_name)
+    # sf::st_crs(las_stem_tile)
+    # plot(las_stem_tile, color = "Classification")
+    las_stem_tile@data %>% dplyr::glimpse()
         
-        ### Search through tree points and estimate DBH
-        tree_inv = TreeLS::tlsInventory(las, dh = 1.37, dw = 0.2, d_method = shapeFit(shape = "circle", algorithm = "ransac", n = 20)) 
-        tree_inv$Radius = as.numeric(tree_inv$Radius)
-        tree_inv$dbh_m = tree_inv$Radius*2
-        tree_inv$dbh_cm = tree_inv$dbh_m*100
-        tree_inv$basal_area_m2 = pi * (tree_inv$Radius)^2
-        tree_inv$basal_area_ft2 = tree_inv$basal_area_m2 * 10.764
-        tree_inv
-        
-        ###_____________________________###
+    ### Search through tree points and estimate DBH
+    tree_inv = TreeLS::tlsInventory(
+      las = las_stem_tile
+      # height layer (above ground) to estimate stem diameters, in point cloud units
+      , dh = 1.37
+      # height layer width, in point cloud units
+      , dw = 0.2
+      # parameterized shapeFit function, i.e. method to use for diameter estimation.
+      , d_method = shapeFit(
+        # either "circle" or "cylinder".
+        shape = "circle"
+        # optimization method for estimating the shape's parameters
+        , algorithm = "ransac"
+        # number of points selected on every RANSAC iteration.
+        , n = 20
+      )
+    )
+    tree_inv$Radius = as.numeric(tree_inv$Radius)
+    tree_inv$dbh_m = tree_inv$Radius*2
+    tree_inv$dbh_cm = tree_inv$dbh_m*100
+    tree_inv$basal_area_m2 = pi * (tree_inv$Radius)^2
+    tree_inv$basal_area_ft2 = tree_inv$basal_area_m2 * 10.764
+    tree_inv
+    
+    ###_____________________________###
         ### Create spatial file outputs ###
         ###_____________________________###
         
