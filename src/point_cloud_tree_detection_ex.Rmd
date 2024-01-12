@@ -1880,7 +1880,7 @@ This is an example of the full process:
 
 ### 1. Read Normalized Point Cloud
 
-```{r detect-stem-st1, webgl=FALSE, eval=F}
+```{r detect-stem-st1, webgl=FALSE, eval=T}
 # read single data tile
   las_norm_tile_temp = list.files(
       config$las_norm_tile_dir
@@ -1902,7 +1902,7 @@ plot3D::scatter3D(
 
 ### 2. Detect Stems
 
-```{r detect-stem-st2, webgl=FALSE, eval=F}
+```{r detect-stem-st2, webgl=FALSE, eval=T}
 # implement the tree detection function
 # this function is essentially TreeLS::treeMap(las, method = map.hough(...))
   treemap_temp = tree_map_function(las_norm_tile_temp)
@@ -1939,7 +1939,7 @@ plot3D::scatter3D(
 
 ### 3. Assign TreeID to Normalized Points
 
-```{r detect-stem-st3, webgl=FALSE, eval=F}
+```{r detect-stem-st3, webgl=FALSE, eval=T}
 ### Classify tree regions
   ## Assigns TreeIDs to a LAS object based on coordinates extracted from a treeMap object.
   las_norm_tile_temp = las_norm_tile_temp %>% 
@@ -1960,7 +1960,7 @@ plot3D::scatter3D(
 
 ### 4. Classify Normalized Points as Stem Points
 
-```{r detect-stem-st4, webgl=FALSE, eval=F}
+```{r detect-stem-st4, webgl=FALSE, eval=T}
 ### Classify stem points
   las_norm_tile_temp = TreeLS::stemPoints(
     las = las_norm_tile_temp
@@ -2004,7 +2004,7 @@ plot3D::scatter3D(
 
 ### 5. Estimate DBH from the Stem Points{#ex_est_dbh}
 
-```{r detect-stem-st5, webgl=FALSE, eval=F}
+```{r detect-stem-st5, webgl=FALSE, eval=T}
 ### Search through tree points and estimate DBH to return a data frame of results
   tree_inv_temp = TreeLS::tlsInventory(
     las = las_norm_tile_temp
@@ -2251,6 +2251,7 @@ mapview::mapview(
 <span style="color: red;">Note!: this clean-up process uses code from the original author Neal Swayze with no edits.</span>
 
 The cleaning process uses the following steps:
+
 * remove stems with empty radius estimates from the `TreeLS::tlsInventory` DBH estimation step
 * remove stems >= DBH threshold set by the user in the parameter `dbh_max_size_m` (`r dbh_max_size_m`m in this example)
 * remove stems with empty or invalid xy coordinates
