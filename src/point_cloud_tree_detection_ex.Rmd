@@ -1385,7 +1385,7 @@ rasterize_tiles_to_chm = function(
   end_time = Sys.time()
   total_time = difftime(end_time, start_time, units = c("mins"))
   message(" --- Total lidar rasterization took ", total_time, " minutes --- ")
-  
+  return(master_chm)
 }
 
 ```
@@ -1393,7 +1393,7 @@ rasterize_tiles_to_chm = function(
 Call the function to create the CHM
 
 ```{r create-chm, results='hide', fig.show='hide', message=FALSE}
-rasterize_tiles_to_chm(
+master_chm = rasterize_tiles_to_chm(
   config = config
   , my_des_chm_res = desired_chm_res #0.25 #in meters
   , calculate_extent = F
@@ -2333,9 +2333,9 @@ remove(list = ls()[grep("_temp",ls())])
 gc()
 ```
 
-# Detect Tree Crowns
+# CHM Individual Tree Detection{#chm_tree_detect}
 
-This section utilizes the Canopy Height Model (CHM) raster created in [this section](#create_chm) to perform individual tree detection from the top down (i.e. using raster cell height values). From [The `lidR` Package Book](https://r-lidar.github.io/lidRbook/itd-its.html#itd):
+This section utilizes the Canopy Height Model (CHM) raster created in [this section](#create_chm) which as a grid resolution of **`r desired_chm_res`m** to perform individual tree detection from the top down (i.e. using raster cell height values). From [The `lidR` Package Book](https://r-lidar.github.io/lidRbook/itd-its.html#itd):
 
 *Individual tree detection (ITD) is the process of spatially locating trees and extracting height information. Individual tree segmentation (ITS) is the process of individually delineating detected trees. In `lidR`, detecting and segmenting functions are decoupled to maximize flexibility. Tree tops are first detected using the `locate_trees()` function, followed crown delineation using `segment_trees()`.*
 
@@ -2344,15 +2344,24 @@ The CHM is used to perform individual tree detection using the `lidR::locate_tre
 The individual tree detection algorithm recommended in [Swayze and Tinkham (2022)](https://scholar.google.com/scholar?oi=bibs&hl=en&cluster=10655866445299954513) is a local maximum variable window function based on research in ponderosa pine (*Pinus ponderosa*) forests by [Creasy et al. (2021)](https://scholar.google.com/scholar?cluster=10356932785437169630&hl=en&as_sdt=0,6) and [Tinkham and Swayze (2021)](https://scholar.google.com/scholar?cluster=11260597505702247290&hl=en&as_sdt=0,6). This recommended variable window function has the form:
 
 $$
-\textsf{variable window radius} = \textsf{local maximum pixel} \times 0.1
+\textrm{variable window radius} = \textrm{pixel height} \times 0.1
 $$
+This particular variable window radius function with a minimum window size of 2m and a maximum window size of  5m has the shape:
 
-This particular variable window radius function has the shape:
-
-```{r ex-window, include=FALSE, eval=TRUE}
-f_temp = function(x){x*0.1}
+```{r ex-var-window, include=FALSE, eval=TRUE}
+library(tidyverse)
+f_temp = function(x) {
+  y = dplyr::case_when(
+    is.na(x) ~ 1e-3 # requires non-null
+    , x < 0 ~ 1e-3 # requires positive
+    , x < 2 ~ 2 # set lower bound
+    , x > 20 ~ 5  # set upper bound
+    , TRUE ~ 2 + (x * 0.1)
+  )
+  return(y)
+}
 data.frame(
-  height_m = seq(0,max_height_threshold,2)
+  height_m = seq(0,50,2)
 ) %>% 
 dplyr::mutate(
   window_size_m = f_temp(height_m)
@@ -2360,6 +2369,7 @@ dplyr::mutate(
 ggplot(mapping = aes(x=height_m, y=window_size_m)) + 
   geom_line() + 
   labs(x="Height (m)", y="Window Size (m)") + 
+  scale_y_continuous(limits = c(0,6)) +
   theme_light()
 remove(f_temp)
 ```
@@ -2382,14 +2392,20 @@ remove(list = ls()[grep("_temp",ls())])
 A variable window size can be implemented in the `lidR::locate_trees` function via the following code:
 
 ```{r ex-locate-trees, eval=FALSE}
-# define the variable window function
-ws_fn <- function(x) {
-  y = x * 0.1
+ws_fn = function(x) {
+  y = dplyr::case_when(
+    is.na(x) ~ 1e-3 # requires non-null
+    , x < 0 ~ 1e-3 # requires positive
+    , x < 2 ~ 2 # set lower bound
+    , x > 20 ~ 5  # set upper bound
+    , TRUE ~ 2 + (x * 0.1)
+  )
   return(y)
 }
+
 # call the locate trees function and pass the variable window
 lidR::locate_trees(
-  input_chm
+  chm
   , algorithm = lmf(
     ws = ws_fn
     , hmin = 1.37
@@ -2397,9 +2413,9 @@ lidR::locate_trees(
 )
 ```
 
-## Define the tree detection function
+## Implement CHM Individual Tree Detection
 
-This function reads a CHM raster file stored as a `tif`and applies the individual tree detection algorithm.
+This function uses the CHM raster created in [this section](#create_chm) and applies the individual tree detection algorithm *using a variable window function of linear form* (with a minimum window size of 2m and a maximum window size of 5m)
 
 ```{r chm-tree-detect}
 ###___________________________________________________###
@@ -2407,39 +2423,59 @@ This function reads a CHM raster file stored as a `tif`and applies the individua
 ###___________________________________________________###
 # define the variable window function
 ws_fn = function(x) {
-  y = x * 0.1
-  y = ifelse(is.na(x), 0.1, max(y,0.1))
+  y = dplyr::case_when(
+    is.na(x) ~ 1e-3 # requires non-null
+    , x < 0 ~ 1e-3 # requires positive
+    , x < 2 ~ 2 # set lower bound
+    , x > 20 ~ 5  # set upper bound
+    , TRUE ~ 2 + (x * 0.1)
+  )
   return(y)
 }
-###___________________________________________________###
-### create function to detect crowns top down
-###___________________________________________________###
-### New function to detect crowns top down, independent from main pipeline
-# list.files(config$delivery_spatial_dir, pattern = ".*chm_raster_z-Inf.*\\.tif$", full.names = T) 
-tif_path_name = 
-list.files(config$delivery_spatial_dir, pattern = ".*chm_raster_z-Inf.*\\.tif$", full.names = T)[1]
 
-# detect_crowns_top_down = function(config, desired_chm_res, window_size, minimum_tree_height, min_crown_size_m2){
-
-  ### Read in the chm
-  input_chm = terra::rast(tif_path_name)
-  # input_chm 
-  # terra::crs(input_chm)
-  # plot(input_chm)
+###___________________________________________________###
+### Individual tree detection using CHM (top down)
+###___________________________________________________###
+  # master_chm = rasterize_tiles_to_chm()
+  # terra::crs(master_chm)
+  # plot(master_chm)
   
-  ### Get tree tops using liDR
-  
-  # ITD on CHM
-  # call the locate trees function and pass the variable window
-  input_seeds = lidR::locate_trees(
-    input_chm
+  ### ITD on CHM
+  # call the locate_trees function and pass the variable window
+  tree_tops = lidR::locate_trees(
+    master_chm
     , algorithm = lmf(
       ws = ws_fn
       , hmin = minimum_tree_height
     )
   )
-  # plot(input_chm, col = height.colors(50))
-  # plot(sf::st_geometry(input_seeds), add = TRUE, pch = 20)
+```
+
+View the results of the individual tree detection overlaid on the CHM raster
+
+```{r plt-chm-tree-detect}
+ggplot() + 
+  geom_tile(
+    data = master_chm %>% as.data.frame(xy=T) %>% dplyr::rename(f=3)
+    , mapping = aes(x=x,y=y,fill=f)
+  ) +
+  geom_sf(
+    data = tree_tops
+    , shape = 20
+    , color = "black"
+  ) +
+  coord_sf(
+    expand = FALSE
+  ) +
+  scale_fill_viridis_c(option = "plasma") +
+  labs(fill = "Hgt. (m)", x = "", y = "") +
+  theme_light()
+```
+
+
+```{r, include=F, eval=F}
+# plot(master_chm, col = height.colors(50))
+  # plot(sf::st_geometry(tree_tops), add = TRUE, pch = 20)
   # 
   xxx
   input_seeds = sf::st_zm(input_seeds)
