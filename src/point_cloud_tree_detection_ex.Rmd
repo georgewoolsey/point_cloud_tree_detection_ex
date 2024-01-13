@@ -66,11 +66,14 @@ library(tidyverse) # the tidyverse
 library(viridis) # viridis colors
 library(scales) # work with number and plot scales
 library(latex2exp) # math formulas with latex
+
 # spatial analysis
 library(terra) # raster
 library(sf) # simple features
 library(sfarrow) # sf to Apache-Parquet files for working with large files
 library(geometry) # mesh generation and surface tessellation
+library(exactextractr) #summarizes raster values over polygonal areas ("zonal statistics")
+
 # point cloud processing
 library(lidR)
 library(ForestTools)
@@ -80,23 +83,28 @@ library(rlas)
   # library(pak)
   # pak::pkg_install("tiagodc/TreeLS")
   library(TreeLS) # removed from CRAN
+
 # FIA data
 ## devtools::install_github('hunter-stanke/rFIA')
 ## library(rFIA) ## removed from CRAN
+
 # modeling
 library(randomForest)
 library(Metrics)
 library(RCSF) # for the cloth simulation filter (csf) to classify points
+
 # parallel computing
 library(ini) # Parse simple '.ini' configuration files to an structured list
 library(parallel) # parallel
 library(doParallel)
 library(foreach) # facilitates parallelization by lapply'ing %dopar% on for loop
+
 # visualization
 library(mapview) # interactive html maps
 library(randomcoloR)
 library(plot3D)
 library(rgl) # more 3d visualization
+
 # others
 library(dbscan)
 library(deldir)
@@ -140,14 +148,12 @@ desired_chm_res = 1
 
 ### Set the maximum height for the stem-only canopy height model
 max_stem_height_threshold = 60
-### Set the minimum height for the stem-only canopy height model
-min_stem_height_threshold = 60
 
 ### Set the window size for top down tree detection in metres
 window_size = 3.5
 
-### Set the minimum height for crown delineation
-minimum_height = 1
+### Set the minimum height (m) for individual tree detection in `lidR::locate_trees`
+minimum_tree_height = 1.37
 
 ### Set the minimum crown size (m^2) to be retained after delineation
 min_crown_size_m2 = 3
@@ -353,7 +359,7 @@ generate_grid_over_extent = function(las_ctg, desired_tile_res){
 
 Call the function to make the grid and save to disk as `parquet` file which allows for fast read/write. A key goal of the `sfarrow` package is to support inter-operability of spatial data in files between R and Python through the use of standardized metadata.
 
-<span style="color: red;">*George W. notes: this buffer is buffering each cell instead of buffering the extent and then creating the grid...which is it supposed to be for processing?*</span>
+<span style="color: red;">*George W. notes: this buffer is buffering each tile instead of buffering the extent and then creating the grid...which is it supposed to be for processing?*</span>
 
 ```{r make-grid}
 ### Generate the grid
@@ -2322,53 +2328,120 @@ dbh_locations_sf %>%
   kableExtra::kable_styling()
 ```
 
-
-```{r include=F, eval=F}
-  
-  ### Get the total processing time
-  master_end = Sys.time()
-  master_total = difftime(master_end, master_start, units = c("mins"))
-  print(paste0("Total DBH detection took ", master_total, " minutes ... "))
-  
-  ### Compile output statistics 
-  number_trees_found = nrow(dbh_locations_sf)
-  number_tiles_processed = nrow(stem_detection_status_grid)
-  number_tiles_failed = num_files_failed
-  master_dbh_detection_mins = master_total
-  output_stats = cbind(number_tiles_processed, number_tiles_failed, number_trees_found, master_dbh_detection_mins)
-  
-  ### Write output statistics to the disk
-  setwd(config$delivery_stats_dir)
-  write.csv(output_stats, file = "03_dbh_detection_stats.csv")
-  print(paste0("Total stem detection complete ... "))
-  
-}
-
+```{r, warning=FALSE, message=FALSE, echo=FALSE, include=FALSE}
+remove(list = ls()[grep("_temp",ls())])
+gc()
 ```
 
----
+# Detect Tree Crowns
 
-```{r, eval=F, include=F}
+This section utilizes the Canopy Height Model (CHM) raster created in [this section](#create_chm) to perform individual tree detection from the top down (i.e. using raster cell height values). From [The `lidR` Package Book](https://r-lidar.github.io/lidRbook/itd-its.html#itd):
 
-###__________________________###
-### FUNCTIONS IN DEVELOPMENT ###
-###__________________________###
+*Individual tree detection (ITD) is the process of spatially locating trees and extracting height information. Individual tree segmentation (ITS) is the process of individually delineating detected trees. In `lidR`, detecting and segmenting functions are decoupled to maximize flexibility. Tree tops are first detected using the `locate_trees()` function, followed crown delineation using `segment_trees()`.*
 
-### New function to detect crowns top down, independent from main pipeline
-detect_crowns_top_down = function(config, desired_chm_res, window_size, minimum_height, min_crown_size_m2){
-  
-  ### Read in the chm
-  setwd(config$delivery_spatial_dir)
-  desired_chm_name = paste0("master_chm_raster_", desired_chm_res, "m.tif")
-  message("Reading in ", desired_chm_name, " ... ")
-  input_file_path = paste0(config$delivery_spatial_dir, "/", desired_chm_name)
-  input_chm = terra::rast(input_file_path)
+The CHM is used to perform individual tree detection using the `lidR::locate_trees` function with the `lmf` algorithm which implements a local maximum filter based on the window size (`ws`) parameter with a minimum tree height (`hmin`) parameter of 1.37m. The window size can be fixed or variable and its shape can be square or circular. 
+
+The individual tree detection algorithm recommended in [Swayze and Tinkham (2022)](https://scholar.google.com/scholar?oi=bibs&hl=en&cluster=10655866445299954513) is a local maximum variable window function based on research in ponderosa pine (*Pinus ponderosa*) forests by [Creasy et al. (2021)](https://scholar.google.com/scholar?cluster=10356932785437169630&hl=en&as_sdt=0,6) and [Tinkham and Swayze (2021)](https://scholar.google.com/scholar?cluster=11260597505702247290&hl=en&as_sdt=0,6). This recommended variable window function has the form:
+
+$$
+\textsf{variable window radius} = \textsf{local maximum pixel} \times 0.1
+$$
+
+This particular variable window radius function has the shape:
+
+```{r ex-window, include=FALSE, eval=TRUE}
+f_temp = function(x){x*0.1}
+data.frame(
+  height_m = seq(0,max_height_threshold,2)
+) %>% 
+dplyr::mutate(
+  window_size_m = f_temp(height_m)
+) %>% 
+ggplot(mapping = aes(x=height_m, y=window_size_m)) + 
+  geom_line() + 
+  labs(x="Height (m)", y="Window Size (m)") + 
+  theme_light()
+remove(f_temp)
+```
+
+```{r, include=FALSE, eval=FALSE}
+f_temp <- function(x) {
+  y = dplyr::case_when(
+    x < 2 ~ 3
+    , x > 20 ~ 5
+    , TRUE ~ 2.6 * (-(exp(-0.08*(x-2)) - 1)) + 3
+  )
+  return(y)
+}
+heights_temp <- seq(-5,30,0.5)
+ws_temp <- f_temp(heights_temp)
+plot(heights_temp, ws_temp, type = "l",  ylim = c(0,6))
+remove(list = ls()[grep("_temp",ls())])
+```
+
+A variable window size can be implemented in the `lidR::locate_trees` function via the following code:
+
+```{r ex-locate-trees, eval=FALSE}
+# define the variable window function
+ws_fn <- function(x) {
+  y = x * 0.1
+  return(y)
+}
+# call the locate trees function and pass the variable window
+lidR::locate_trees(
   input_chm
+  , algorithm = lmf(
+    ws = ws_fn
+    , hmin = 1.37
+  )
+)
+```
+
+## Define the tree detection function
+
+This function reads a CHM raster file stored as a `tif`and applies the individual tree detection algorithm.
+
+```{r chm-tree-detect}
+###___________________________________________________###
+### define the variable window function
+###___________________________________________________###
+# define the variable window function
+ws_fn = function(x) {
+  y = x * 0.1
+  y = ifelse(is.na(x), 0.1, max(y,0.1))
+  return(y)
+}
+###___________________________________________________###
+### create function to detect crowns top down
+###___________________________________________________###
+### New function to detect crowns top down, independent from main pipeline
+# list.files(config$delivery_spatial_dir, pattern = ".*chm_raster_z-Inf.*\\.tif$", full.names = T) 
+tif_path_name = 
+list.files(config$delivery_spatial_dir, pattern = ".*chm_raster_z-Inf.*\\.tif$", full.names = T)[1]
+
+# detect_crowns_top_down = function(config, desired_chm_res, window_size, minimum_tree_height, min_crown_size_m2){
+
+  ### Read in the chm
+  input_chm = terra::rast(tif_path_name)
+  # input_chm 
+  # terra::crs(input_chm)
+  # plot(input_chm)
   
-  ### Get tree tops using liDR tools
-  start_time = Sys.time()
-  message("Detecting tree tops through local maxima detection ... ")
-  input_seeds = lidR::locate_trees(input_chm, algorithm = lmf(ws = window_size, hmin = minimum_height))
+  ### Get tree tops using liDR
+  
+  # ITD on CHM
+  # call the locate trees function and pass the variable window
+  input_seeds = lidR::locate_trees(
+    input_chm
+    , algorithm = lmf(
+      ws = ws_fn
+      , hmin = minimum_tree_height
+    )
+  )
+  # plot(input_chm, col = height.colors(50))
+  # plot(sf::st_geometry(input_seeds), add = TRUE, pch = 20)
+  # 
+  xxx
   input_seeds = sf::st_zm(input_seeds)
   input_seeds
   
@@ -2412,6 +2485,10 @@ detect_crowns_top_down = function(config, desired_chm_res, window_size, minimum_
   crowns
   
   ### Add height summaries
+  # terra::extract
+  # terra::extract(r, v, mean, na.rm = TRUE,weights = TRUE)
+  # terra::zonal
+
   message("Extracting height summaries for each crown ... ")
   mean_crown_ht_m = exactextractr::exact_extract(input_chm, crowns, fun = "mean")
   median_crown_ht_m = exactextractr::exact_extract(input_chm, crowns, fun = "median")
@@ -2430,6 +2507,17 @@ detect_crowns_top_down = function(config, desired_chm_res, window_size, minimum_
   
   
 }
+
+```
+
+
+---
+
+```{r, eval=F, include=F}
+
+###__________________________###
+### FUNCTIONS IN DEVELOPMENT ###
+###__________________________###
 
 ### New function to detect crowns bottom up, independent from main pipeline
 detect_crowns_bottom_up = function(config, desired_chm_res, window_size, minimum_height, min_crown_size_m2){
