@@ -76,8 +76,13 @@ library(exactextractr) #summarizes raster values over polygonal areas ("zonal st
 
 # point cloud processing
 library(lidR)
-library(ForestTools)
+library(ForestTools) # for crown delineation but relies on depreciated `raster`
 library(rlas)
+## lidR::watershed requires EBImage::watershed 
+  # install.packages("BiocManager")
+  # BiocManager::install("EBImage")
+  # library(BiocManager) # required for lidR::watershed
+  library(EBImage) # required for lidR::watershed
 ## !! TreeLS package removed from CRAN...
   ## uncomment to install from github dev repo: https://github.com/tiagodc/TreeLS
   # library(pak)
@@ -2348,7 +2353,7 @@ $$
 $$
 This particular variable window radius function with a minimum window size of 2m and a maximum window size of  5m has the shape:
 
-```{r ex-var-window, include=FALSE, eval=TRUE}
+```{r ex-var-window, include=FALSE, eval=TRUE, fig.show='hold'}
 library(tidyverse)
 f_temp = function(x) {
   y = dplyr::case_when(
@@ -2392,12 +2397,13 @@ remove(list = ls()[grep("_temp",ls())])
 A variable window size can be implemented in the `lidR::locate_trees` function via the following code:
 
 ```{r ex-locate-trees, eval=FALSE}
+# define the variable window function
 ws_fn = function(x) {
   y = dplyr::case_when(
     is.na(x) ~ 1e-3 # requires non-null
     , x < 0 ~ 1e-3 # requires positive
     , x < 2 ~ 2 # set lower bound
-    , x > 20 ~ 5  # set upper bound
+    , x > 30 ~ 5  # set upper bound
     , TRUE ~ 2 + (x * 0.1)
   )
   return(y)
@@ -2415,7 +2421,7 @@ lidR::locate_trees(
 
 ## Implement CHM Individual Tree Detection
 
-This function uses the CHM raster created in [this section](#create_chm) and applies the individual tree detection algorithm *using a variable window function of linear form* (with a minimum window size of 2m and a maximum window size of 5m)
+This function uses the CHM raster created in [this section](#create_chm) and applies the individual tree detection algorithm *using a variable window function of linear form* (with a minimum window size of 2m for pixels 2m and below and a maximum window size of 5m for pixels 30m in height above). The result is a `sf` data frame with point locations of tree tops.
 
 ```{r chm-tree-detect}
 ###___________________________________________________###
@@ -2427,7 +2433,7 @@ ws_fn = function(x) {
     is.na(x) ~ 1e-3 # requires non-null
     , x < 0 ~ 1e-3 # requires positive
     , x < 2 ~ 2 # set lower bound
-    , x > 20 ~ 5  # set upper bound
+    , x > 30 ~ 5  # set upper bound
     , TRUE ~ 2 + (x * 0.1)
   )
   return(y)
@@ -2449,6 +2455,7 @@ ws_fn = function(x) {
       , hmin = minimum_tree_height
     )
   )
+  # str(tree_tops)
 ```
 
 View the results of the individual tree detection overlaid on the CHM raster
@@ -2472,22 +2479,47 @@ ggplot() +
   theme_light()
 ```
 
+# Delineate Tree Crowns
 
-```{r, include=F, eval=F}
-# plot(master_chm, col = height.colors(50))
-  # plot(sf::st_geometry(tree_tops), add = TRUE, pch = 20)
-  # 
-  xxx
-  input_seeds = sf::st_zm(input_seeds)
-  input_seeds
-  
-  ### Use the tree tops to delineate crowns using MCWS from ForestTools
-  message("Delineating crowns from detected local maxima ... ")
-  input_chm_raster = raster::raster(input_chm)
-  crowns = ForestTools::mcws(input_seeds, input_chm_raster, minHeight = minimum_height, format = "raster", verbose = FALSE)
-  crowns
-  
-  ### Get the treeID fixed for the input seeds
+This step uses the [Individual Tree Detection based on the CHM](#chm_tree_detect) to delineate tree crown vector (i.e. polygon) shapes.
+
+*[Creasy et al. (2021)](https://scholar.google.com/scholar?oi=bibs&hl=en&cluster=10356932785437169630)* evaluated four different crown delineation algorithms in ponderosa pine (*Pinus ponderosa*) forests: the Dalponte `lidR::dalponte2016`, Silva `lidR::silva2016`, and watershed `lidR::watershed` algorithms inside the `lidR::segment_trees` function and the marker-controlled watershed function from the `ForestTools` package. Overall, the `lidR::watershed` algorithm provided the smallest crown area bias though small crown areas were overestimated and larger crowns were underestimated.
+
+The `lidR::segment_trees` function works on an input point cloud (i.e. `las`) without the requirement to create a canopy height model (CHM) beforehand. However, the crown delineation algorithms available within the `lidR` package can be run outside of the `lidR::segment_trees` function using only an input CHM raster. From [The `lidR` Package Book](https://r-lidar.github.io/lidRbook/itd-its.html#its-chm):
+
+*While point cloud segmentation is standard in lidR, users may only have access to a CHM. There are many reasons for only using a CHM, and this is why raster-based methods can be run standalone outside segment_trees(). Whether using the point cloud or a raster, segmentation results will be exactly the same. The difference will be the data format of the segmentation result. In lidR, a LAS object will gain a treeID attribute, while for rasters, delineated crowns are returned in a raster format.* To work outside segment_trees() it suffices to call the function standalone like this:
+
+```{r ex-crown-delin, include=TRUE, eval=FALSE}
+crowns = lidR::watershed(
+  # input raster layer !! works with terra or stars !!
+  chm = master_chm
+  # threshold below which a pixel cannot be a tree. Default is 2
+  , th_tree = 1.37
+)
+
+plot(crowns, col = (viridis::turbo(2000) %>% sample()))
+```
+
+<span style="color: red;">George W. notes: the `lidR::watershed` call above fails because the input CHM created in [this section](#chm_tree_detect) requires no empty raster cells. Obtaining a CHM raster with unempty cells can be accomplished using the interpolation and mosaic methods discussed in that section. Alternatively, the `lidR::segment_trees` function can be utilized with a point cloud covering the full study extent which requires a complete (non-tiled) point cloud (perhaps using the `laz` file created based off of the CHM raster and written to the disk `r config$delivery_las_dir` directory).</span>
+
+Instead, the `ForestTools::mcws` marker-controlled watershed segmentation algorithm is used below and requires input individual tree top points and a CHM. However, this package relies on the `raster` package which was depreciated in 2023. 
+
+```{r crown-delin}
+# this requires the `raster` package which is depreciated
+crowns = ForestTools::mcws(
+  treetops = sf::st_zm(tree_tops, drop = T) # drops z values
+  , CHM = raster::raster(master_chm) # converts to raster data
+  , minHeight = 1.37
+) %>% terra::rast()
+# str(crowns)
+
+# plot the crowns
+plot(crowns, col = (viridis::turbo(2000) %>% sample()))
+```
+
+
+```{r, include=FALSE, eval=FALSE}
+### Get the treeID fixed for the input seeds
   message("Cleaning up delineated crowns ... ")
   input_seeds_coords = as.data.frame(sf::st_coordinates(input_seeds))
   treeID = paste0(round(input_seeds_coords$X, 1), "_", round(input_seeds_coords$Y, 1))
