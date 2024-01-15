@@ -2306,14 +2306,14 @@ This step also creates a vector file of the stems with points sized by the radiu
 ###___________________________________________________________###
   sf:::st_write(
     dbh_locations_sf
-    , dsn = paste0(config$working_spatial_dir, "/bottom_up_detected_stem_locations.gpkg")
+    , dsn = paste0(config$delivery_spatial_dir, "/bottom_up_detected_stem_locations.gpkg")
     , append = FALSE
     , delete_dsn = TRUE
     , quiet = TRUE
   )
   sf:::st_write(
     dbh_locations_sf_buffer
-    , dsn = paste0(config$working_spatial_dir, "/bottom_up_detected_stem_locations_buffered.gpkg")
+    , dsn = paste0(config$delivery_spatial_dir, "/bottom_up_detected_stem_locations_buffered.gpkg")
     , append = FALSE
     , delete_dsn = TRUE
     , quiet = TRUE
@@ -2487,7 +2487,7 @@ remove(list = ls()[grep("_temp",ls())])
 gc()
 ```
 
-# Delineate Tree Crowns
+# Delineate Tree Crowns{#crown_delin}
 
 This step uses the [Individual Tree Detection based on the CHM](#chm_tree_detect) to delineate tree crown vector (i.e. polygon) shapes.
 
@@ -2615,6 +2615,12 @@ crowns_sf = crowns_sf %>%
   
   # str(crowns_sf)
   # crowns_sf %>% dplyr::count(treeID) %>% nrow()
+  # crowns_sf %>%
+  #   sf::st_drop_geometry() %>%
+  #   dplyr::summarise(
+  #     n = n()
+  #     , n_distinct = dplyr::n_distinct(treeID)
+  #   )
 
 ### Add crown data summaries
 crown_sum_temp = data.frame(
@@ -2692,6 +2698,155 @@ remove(list = ls()[grep("_temp",ls())])
 gc()
 ```
 
+# Delineate tree crowns for `TreeLS` identified trees
+
+This step is distinct from the tree crown delineation in the [prior section](#crown_delin) which used the [Individual Tree Detection based on the CHM](#chm_tree_detect) to delineate tree crown vector (i.e. polygon) shapes.
+
+Instead, this section uses the stems detected using the `TreeLS` [workflow in this section](#detect-stems) to delineate tree crown vector (i.e. polygon) shapes.
+
+<span style="color: red;">George W. notes: It is unclear if this step is necessary. It seems like the "master" tree list should be based on the overhead tree identification using the CHM data. This "master" tree list can be spatially joined to the stems detected in the `TreeLS` workflow to attach DBH estimates. If more than one stem location is attached to a single tree from the master list, then the best DBH estimate can be selected based on the process outlined in [Swayze and Tinkham (2022)](https://scholar.google.com/scholar?oi=bibs&hl=en&cluster=10655866445299954513). Perhaps this happens later?</span>
+
+```{r crowns-treels}
+### Use the stems detected using TreeLS::treeMap to delineate crowns using MCWS from ForestTools
+  ### Use the tree tops to delineate crowns using MCWS from ForestTools
+  crowns_treels = ForestTools::mcws(
+    treetops = dbh_locations_sf %>% 
+      dplyr::mutate(treeID = dplyr::row_number()) %>% 
+      dplyr::rename(Z=tree_height_m) %>% 
+      dplyr::select(treeID, Z) %>% 
+      sf::st_zm(drop = T) # drops z values
+    , CHM = raster::raster(master_chm) # converts to raster data
+    , minHeight = 1.37
+  ) %>% terra::rast()
+
+
+### Write the crown raster to the disk
+terra::writeRaster(
+  crowns
+  , paste0(config$delivery_spatial_dir, "/bottom_up_detected_tree_crowns.tif")
+  , overwrite = TRUE
+)
+
+```
+
+Plot the tree crowns with the `TreeLS` identified tree stems
+
+```{r plt-crowns-treels}
+ggplot() + 
+  geom_tile(
+    data = crowns_treels %>% as.data.frame(xy=T) %>% dplyr::rename(f=3)
+    , mapping = aes(x=x,y=y,fill=as.factor(f))
+  ) +
+  geom_sf(
+    data = dbh_locations_sf
+    , shape = 20
+    , color = "black"
+  ) +
+  coord_sf(
+    expand = FALSE
+  ) +
+  scale_fill_manual(
+    values = viridis::turbo(n = terra::freq(crowns_treels) %>% nrow()) %>% sample()
+  ) +
+  labs(x = "", y = "") +
+  theme_light() +
+  theme(legend.position = "none")
+```
+
+## Spatial join the `TreeLS` stems with the `TreeLS` tree crowns
+
+The delineated crown raster (`terra` SpatRaster) is converted to vector data (i.e. polygons) and crowns with an area smaller than the user defined crown area are removed (`r min_crown_size_m2`m in this example). The tree tops are then spatially joined with the tree crowns.
+
+```{r crowns-treels-join}
+### Convert crown raster to terra rast, then polygons, then to Sf
+crowns_treels_sf = crowns_treels %>% 
+  # convert raster to polygons for each individual crown
+  terra::as.polygons() %>% 
+  # fix polygon validity
+  terra::makeValid() %>% 
+  # reduce the number of nodes in geometries
+  terra::simplifyGeom() %>% 
+  # remove holes in polygons
+  terra::fillHoles() %>% 
+  # convert to sf
+  sf::st_as_sf() %>% 
+  # get the crown area
+  dplyr::mutate(
+    crown_area_m2 = as.numeric(sf::st_area(.))
+  ) %>% 
+  #remove super small crowns
+  dplyr::filter(
+    crown_area_m2 > min_crown_size_m2
+  )
+  
+  # str(crowns_treels_sf)
+  # ggplot(crowns_treels_sf) + geom_sf(aes(fill=as.factor(layer))) + 
+  #   scale_fill_manual(values = viridis::turbo(nrow(crowns_treels_sf)) %>% sample()) +
+  #   theme_void() + theme(legend.position = "none")
+  
+### Join the crowns_treels with the seeds to append data, remove Nulls
+crowns_treels_sf = crowns_treels_sf %>%
+  sf::st_join(dbh_locations_sf) %>% 
+  dplyr::select(-c(layer))
+  
+  # str(crowns_treels_sf)
+  # crowns_treels_sf %>% dplyr::count(treeID) %>% nrow()
+  # crowns_treels_sf %>%
+  #   sf::st_drop_geometry() %>%
+  #   dplyr::summarise(
+  #     n = n()
+  #     , n_distinct = dplyr::n_distinct(treeID)
+  #   )
+
+### Add crown data summaries
+crown_sum_temp = data.frame(
+    mean_crown_ht_m = terra::extract(x = master_chm, y = terra::vect(crowns_treels_sf), fun = "mean", na.rm = T)
+    , median_crown_ht_m = terra::extract(x = master_chm, y = terra::vect(crowns_treels_sf), fun = "median", na.rm = T)
+    , min_crown_ht_m = terra::extract(x = master_chm, y = terra::vect(crowns_treels_sf), fun = "min", na.rm = T)
+  ) %>% 
+  dplyr::select(-c(tidyselect::ends_with(".ID"))) %>% 
+  dplyr::rename_with(~ stringr::str_remove_all(.x,".Z"))
+
+
+### join crown data summary
+crowns_treels_sf = crowns_treels_sf %>% 
+  dplyr::bind_cols(crown_sum_temp)
+
+# str(crowns_treels_sf)
+
+### Write the crowns_treels to the disk
+  sf::st_write(
+    crowns_treels_sf
+    , paste0(config$delivery_spatial_dir, "/bottom_up_detected_crowns.gpkg")
+    , quiet = TRUE, append = FALSE
+  )
+```
+
+Plot the tree crowns with the tree tops 
+
+```{r plt-crowns-treels-join}
+ggplot() + 
+  geom_sf(
+    data = crowns_treels_sf
+    , mapping = aes(fill = crown_area_m2)
+    , color = "gray77"
+  ) +
+  geom_sf(
+    data = dbh_locations_sf
+    , shape = 20
+    , color = "gray33"
+  ) +
+  coord_sf(
+    expand = FALSE
+  ) +
+  scale_fill_viridis_c(option = "mako", direction = -1) +
+  labs(fill = "Crown\nArea (m2)", x = "", y = "") +
+  theme_light() 
+```
+
+<span style="color: red;">George W. notes: this crown delineation methodology results in crown areas that are highly improbably. [Creasy et al. (2021)](https://scholar.google.com/scholar?cluster=10356932785437169630&hl=en&as_sdt=0,6) measured crown areas of 163.8 (+/- 81.4) m2. Hopefully this crown delineation is not utilized in any following analysis.</span>
+
+
 ---
 
 ```{r, eval=F, include=F}
@@ -2699,90 +2854,6 @@ gc()
 ###__________________________###
 ### FUNCTIONS IN DEVELOPMENT ###
 ###__________________________###
-
-### New function to detect crowns bottom up, independent from main pipeline
-detect_crowns_bottom_up = function(config, desired_chm_res, window_size, minimum_height, min_crown_size_m2){
-  
-  ### Read in the detected stem locations
-  start_time = Sys.time()
-  
-  ### Read in the chm
-  setwd(config$delivery_spatial_dir)
-  desired_chm_name = paste0("master_chm_raster_", desired_chm_res, "m.tif")
-  message("Reading in ", desired_chm_name, " ... ")
-  input_file_path = paste0(config$delivery_spatial_dir, "/", desired_chm_name)
-  input_chm = terra::rast(input_file_path)
-  input_chm
-  
-  ## Read in the stems
-  message("Reading in the detected stem location points ... ")
-  path_to_stem_locations = paste0(config$working_spatial_dir, "/bottom_up_detected_stem_locations.gpkg")
-  stem_locations = sf::st_read(path_to_stem_locations, quiet = TRUE)
-  stem_locations
-  
-  ### Create Seeds object for delineation
-  message("Preparing stem locations for crown delineation ... ")
-  input_seeds = subset(stem_locations, select = c(tree_height_m))
-  colnames(input_seeds) = c("Z", "geometry")
-  treeID = rep(1:nrow(input_seeds))
-  input_seeds = cbind(treeID, input_seeds)
-  input_seeds
-  
-  ### Use the tree tops to delineate crowns using MCWS from ForestTools
-  message("Detecting crowns from stem location seeds ... ")
-  input_chm_raster = raster::raster(input_chm)
-  crowns = ForestTools::mcws(input_seeds, input_chm_raster, minHeight = minimum_height, format = "raster")
-  crowns
-  
-  ### Get the treeID fixed for the input seeds
-  message("Cleaning up the delineated crowns ... ")
-  input_seeds_coords = as.data.frame(sf::st_coordinates(input_seeds))
-  treeID = paste0(round(input_seeds_coords$X, 1), "_", round(input_seeds_coords$Y, 1))
-  input_seeds = subset(input_seeds, select = -c(treeID))
-  input_seeds = cbind(input_seeds, treeID)
-  input_seeds
-  
-  ### Convert crown raster to terra rast, then polygons, then to Sf
-  crowns = terra::rast(crowns)
-  crowns = terra::as.polygons(crowns)
-  crowns = terra::simplifyGeom(crowns)
-  crowns = terra::fillHoles(crowns)
-  crowns = sf::st_as_sf(crowns)
-  crowns = sf::st_buffer(crowns, 0)
-  #crowns = sf::st_difference(crowns)
-  
-  ### Get the crown area, then remove super small crowns
-  message("Getting crown area of polygons ... ")
-  crown_area_m2 = as.numeric(sf::st_area(crowns))
-  crowns = cbind(crowns, crown_area_m2)
-  crowns = crowns[crowns$crown_area_m2 > min_crown_size_m2,]
-  
-  ### Join the crowns with the seeds to append data, remove Nulls
-  message("Joining crowns with input tree top seeds ... ")
-  stem_locations = subset(stem_locations, select = -c(treeID))
-  crowns = sf::st_join(crowns, stem_locations)
-  crowns = sf::st_difference(crowns)
-  crowns = subset(crowns, select = -c(layer))
-  
-  ### Add height summaries
-  message("Extracting height summaries for each crown ... ")
-  mean_crown_ht_m = exactextractr::exact_extract(input_chm, crowns, fun = "mean")
-  median_crown_ht_m = exactextractr::exact_extract(input_chm, crowns, fun = "median")
-  min_crown_ht_m = exactextractr::exact_extract(input_chm, crowns, fun = "min")
-  crowns = cbind(crowns, mean_crown_ht_m, median_crown_ht_m, min_crown_ht_m)
-  
-  ### Write the stem crowns to the disk
-  message("Writing the crowns to the disk ... ")
-  setwd(config$working_spatial_dir)
-  sf::st_write(crowns, "bottom_up_detected_crowns.gpkg", quiet = TRUE, append = FALSE)
-  
-  ### Get the total time
-  end_time = Sys.time()
-  total_time = difftime(end_time, start_time, units = c("mins"))
-  message("Total bottom-up crown delineation took ", total_time, " minutes ... ")
-  
-  
-}
 
 ### Detect trees using bottom up seeds and top down seeds 
 wrapper_hybrid_crown_delineation_missing_dbh_prediction = function(config){
