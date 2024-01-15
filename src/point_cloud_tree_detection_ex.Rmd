@@ -77,6 +77,7 @@ library(exactextractr) #summarizes raster values over polygonal areas ("zonal st
 # point cloud processing
 library(lidR)
 library(ForestTools) # for crown delineation but relies on depreciated `raster`
+library(raster) # !! this was depreciated in 2023, used for ForestTools
 library(rlas)
 ## lidR::watershed requires EBImage::watershed 
   # install.packages("BiocManager")
@@ -2050,7 +2051,7 @@ plot3D::scatter3D(
     ) %>% 
     sf::st_as_sf(coords = c("X", "Y"), crs = sf::st_crs(las_norm_tile_temp)) %>% 
     dplyr::select(
-      treeID, H, , stem_x, stem_y, Radius, Error
+      treeID, H, stem_x, stem_y, Radius, Error
       , dbh_m, dbh_cm, basal_area_m2, basal_area_ft2
     ) %>% 
     dplyr::rename(
@@ -2351,6 +2352,7 @@ The individual tree detection algorithm recommended in [Swayze and Tinkham (2022
 $$
 \textrm{variable window radius} = \textrm{pixel height} \times 0.1
 $$
+
 This particular variable window radius function with a minimum window size of 2m and a maximum window size of  5m has the shape:
 
 ```{r ex-var-window, include=FALSE, eval=TRUE, fig.show='hold'}
@@ -2376,7 +2378,6 @@ ggplot(mapping = aes(x=height_m, y=window_size_m)) +
   labs(x="Height (m)", y="Window Size (m)") + 
   scale_y_continuous(limits = c(0,6)) +
   theme_light()
-remove(f_temp)
 ```
 
 ```{r, include=FALSE, eval=FALSE}
@@ -2449,12 +2450,12 @@ ws_fn = function(x) {
   ### ITD on CHM
   # call the locate_trees function and pass the variable window
   tree_tops = lidR::locate_trees(
-    master_chm
-    , algorithm = lmf(
-      ws = ws_fn
-      , hmin = minimum_tree_height
+      master_chm
+      , algorithm = lmf(
+        ws = ws_fn
+        , hmin = minimum_tree_height
+      )
     )
-  )
   # str(tree_tops)
 ```
 
@@ -2477,6 +2478,11 @@ ggplot() +
   scale_fill_viridis_c(option = "plasma") +
   labs(fill = "Hgt. (m)", x = "", y = "") +
   theme_light()
+```
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE, include=FALSE}
+remove(list = ls()[grep("_temp",ls())])
+gc()
 ```
 
 # Delineate Tree Crowns
@@ -2502,7 +2508,7 @@ plot(crowns, col = (viridis::turbo(2000) %>% sample()))
 
 <span style="color: red;">George W. notes: the `lidR::watershed` call above fails because the input CHM created in [this section](#chm_tree_detect) requires no empty raster cells. Obtaining a CHM raster with unempty cells can be accomplished using the interpolation and mosaic methods discussed in that section. Alternatively, the `lidR::segment_trees` function can be utilized with a point cloud covering the full study extent which requires a complete (non-tiled) point cloud (perhaps using the `laz` file created based off of the CHM raster and written to the disk `r config$delivery_las_dir` directory).</span>
 
-Instead, the `ForestTools::mcws` marker-controlled watershed segmentation algorithm is used below and requires input individual tree top points and a CHM. However, this package relies on the `raster` package which was depreciated in 2023. 
+Instead, the `ForestTools::mcws` marker-controlled watershed segmentation algorithm is used below and requires input of individual tree top points and a CHM raster. However, this package relies on the `raster` package which was depreciated in 2023. [Tinkham et al. (2022)]((https://scholar.google.com/scholar?cluster=14807895789640069059&hl=en&as_sdt=0,6)) used this same `ForestTools::mcws` algorithm to delineate tree crowns.
 
 ```{r crown-delin}
 # this requires the `raster` package which is depreciated
@@ -2511,73 +2517,178 @@ crowns = ForestTools::mcws(
   , CHM = raster::raster(master_chm) # converts to raster data
   , minHeight = 1.37
 ) %>% terra::rast()
+
 # str(crowns)
+# plot(crowns, col = (viridis::turbo(2000) %>% sample()))
 
-# plot the crowns
-plot(crowns, col = (viridis::turbo(2000) %>% sample()))
+### Write the crown raster to the disk
+terra::writeRaster(
+  crowns
+  , paste0(config$delivery_spatial_dir, "/top_down_detected_tree_crowns.tif")
+  , overwrite = TRUE
+)
 ```
 
+Plot the tree crowns with the tree tops 
 
-```{r, include=FALSE, eval=FALSE}
-### Get the treeID fixed for the input seeds
-  message("Cleaning up delineated crowns ... ")
-  input_seeds_coords = as.data.frame(sf::st_coordinates(input_seeds))
-  treeID = paste0(round(input_seeds_coords$X, 1), "_", round(input_seeds_coords$Y, 1))
-  input_seeds = subset(input_seeds, select = -c(treeID))
-  input_seeds = cbind(input_seeds, treeID)
-  input_seeds
-  
-  ### Convert crown raster to terra rast, then polygons, then to Sf
-  crowns = terra::rast(crowns)
-  crowns = terra::as.polygons(crowns)
-  crowns = terra::makeValid(crowns)
-  crowns = terra::simplifyGeom(crowns)
-  crowns = terra::fillHoles(crowns)
-  crowns = sf::st_as_sf(crowns)
-  crowns = sf::st_buffer(crowns, 0)
-  
-  ### Get the crown area, then remove super small crowns
-  message("Getting crown area of polygons ... ")
-  crown_area_m2 = as.numeric(sf::st_area(crowns))
-  crowns = cbind(crowns, crown_area_m2)
-  crowns = crowns[crowns$crown_area_m2 > min_crown_size_m2,]
-  crowns
-  
-  ### Join the crowns with the seeds to append data, remove Nulls
-  message("Joining crowns with input tree top seeds ... ")
-  crowns = sf::st_join(crowns, input_seeds)
-  crowns = subset(crowns, select = -c(layer))
-  crowns = sf::st_difference(crowns)
-  crowns = subset(crowns, select = c(treeID, Z, crown_area_m2))
-  colnames(crowns) = c("treeID", "tree_height_m", "crown_area_m2", "geometry") 
-  crowns
-  
-  ### Add height summaries
-  # terra::extract
-  # terra::extract(r, v, mean, na.rm = TRUE,weights = TRUE)
-  # terra::zonal
-
-  message("Extracting height summaries for each crown ... ")
-  mean_crown_ht_m = exactextractr::exact_extract(input_chm, crowns, fun = "mean")
-  median_crown_ht_m = exactextractr::exact_extract(input_chm, crowns, fun = "median")
-  min_crown_ht_m = exactextractr::exact_extract(input_chm, crowns, fun = "min")
-  crowns = cbind(crowns, mean_crown_ht_m, median_crown_ht_m, min_crown_ht_m)
-  
-  ### Write the crowns to the disk
-  message("Writing the crowns to the disk ... ")
-  setwd(config$working_spatial_dir)
-  sf::st_write(crowns, "top_down_detected_crowns.gpkg", quiet = TRUE, append = FALSE)
-  
-  ### Get the end time
-  end_time = Sys.time()
-  total_time = difftime(end_time, start_time, units = c("mins"))
-  message("Total top-down crown delineation took ", total_time, " minutes ... ")
-  
-  
-}
-
+```{r plt-crown-delin}
+ggplot() + 
+  geom_tile(
+    data = crowns %>% as.data.frame(xy=T) %>% dplyr::rename(f=3)
+    , mapping = aes(x=x,y=y,fill=as.factor(f))
+  ) +
+  geom_sf(
+    data = tree_tops
+    , shape = 20
+    , color = "black"
+  ) +
+  coord_sf(
+    expand = FALSE
+  ) +
+  scale_fill_manual(
+    values = viridis::turbo(n = terra::freq(crowns) %>% nrow()) %>% sample()
+  ) +
+  labs(x = "", y = "") +
+  theme_light() +
+  theme(legend.position = "none")
 ```
 
+## Spatial join the tree tops with the tree crowns
+
+The delineated crown raster (`terra` SpatRaster) is converted to vector data (i.e. polygons) and crowns with an area smaller than the user defined crown area are removed (`r min_crown_size_m2`m in this example). The tree tops are then spatially joined with the tree crowns.
+
+```{r crown-tree-join}
+# add tree data to tree_tops
+  tree_tops = tree_tops %>% 
+    # pull out the coordinates and update treeID
+    dplyr::mutate(
+      tree_x = sf::st_coordinates(.)[,1]
+      , tree_y = sf::st_coordinates(.)[,2]
+      , tree_height_m = sf::st_coordinates(.)[,3]
+      , treeID = paste(treeID,round(tree_x, 1),round(tree_y, 1), sep = "_")
+    )
+  # str(tree_tops)
+
+### Write the trees to the disk
+  sf::st_write(
+    tree_tops
+    , paste0(config$delivery_spatial_dir, "/top_down_detected_tree_tops.gpkg")
+    , quiet = TRUE, append = FALSE
+  )
+
+### Convert crown raster to terra rast, then polygons, then to Sf
+crowns_sf = crowns %>% 
+  # convert raster to polygons for each individual crown
+  terra::as.polygons() %>% 
+  # fix polygon validity
+  terra::makeValid() %>% 
+  # reduce the number of nodes in geometries
+  terra::simplifyGeom() %>% 
+  # remove holes in polygons
+  terra::fillHoles() %>% 
+  # convert to sf
+  sf::st_as_sf() %>% 
+  # get the crown area
+  dplyr::mutate(
+    crown_area_m2 = as.numeric(sf::st_area(.))
+  ) %>% 
+  #remove super small crowns
+  dplyr::filter(
+    crown_area_m2 > min_crown_size_m2
+  )
+  
+  # str(crowns_sf)
+  # ggplot(crowns_sf) + geom_sf(aes(fill=as.factor(layer))) + 
+  #   scale_fill_manual(values = viridis::turbo(nrow(crowns_sf)) %>% sample()) +
+  #   theme_void() + theme(legend.position = "none")
+  
+### Join the crowns with the seeds to append data, remove Nulls
+crowns_sf = crowns_sf %>%
+  sf::st_join(tree_tops) %>% 
+  dplyr::select(
+    "treeID", "tree_height_m"
+    , "tree_x", "tree_y"
+    , "crown_area_m2"
+  )
+  
+  # str(crowns_sf)
+  # crowns_sf %>% dplyr::count(treeID) %>% nrow()
+
+### Add crown data summaries
+crown_sum_temp = data.frame(
+    mean_crown_ht_m = terra::extract(x = master_chm, y = terra::vect(crowns_sf), fun = "mean", na.rm = T)
+    , median_crown_ht_m = terra::extract(x = master_chm, y = terra::vect(crowns_sf), fun = "median", na.rm = T)
+    , min_crown_ht_m = terra::extract(x = master_chm, y = terra::vect(crowns_sf), fun = "min", na.rm = T)
+  ) %>% 
+  dplyr::select(-c(tidyselect::ends_with(".ID"))) %>% 
+  dplyr::rename_with(~ stringr::str_remove_all(.x,".Z"))
+
+
+### join crown data summary
+crowns_sf = crowns_sf %>% 
+  dplyr::bind_cols(crown_sum_temp)
+
+# str(crowns_sf)
+
+### Write the crowns to the disk
+  sf::st_write(
+    crowns_sf
+    , paste0(config$delivery_spatial_dir, "/top_down_detected_crowns.gpkg")
+    , quiet = TRUE, append = FALSE
+  )
+```
+
+Plot the tree crowns with the tree tops 
+
+```{r plt-crown-tree-join}
+ggplot() + 
+  geom_sf(
+    data = crowns_sf
+    , mapping = aes(fill = mean_crown_ht_m)
+  ) +
+  geom_sf(
+    data = tree_tops
+    , shape = 20
+    , color = "black"
+  ) +
+  coord_sf(
+    expand = FALSE
+  ) +
+  scale_fill_viridis_c(option = "plasma") +
+  labs(fill = "Mean Crown\nHgt. (m)", x = "", y = "") +
+  theme_light() 
+```
+
+Note that not all tree tops (black dots) have an associated crown. Plot only matched tree tops and crowns.
+
+```{r plt-crown-tree-join2}
+ggplot() + 
+  geom_sf(
+    data = crowns_sf
+    , mapping = aes(fill = mean_crown_ht_m)
+  ) +
+  geom_sf(
+    data = tree_tops %>% 
+      dplyr::inner_join(
+        crowns_sf %>% sf::st_drop_geometry() %>% 
+          dplyr::select(treeID)
+        , dplyr::join_by(treeID)
+      )
+    , shape = 20
+    , color = "black"
+  ) +
+  coord_sf(
+    expand = FALSE
+  ) +
+  scale_fill_viridis_c(option = "plasma") +
+  labs(fill = "Mean Crown\nHgt. (m)", x = "", y = "") +
+  theme_light() 
+```
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE, include=FALSE}
+remove(list = ls()[grep("_temp",ls())])
+gc()
+```
 
 ---
 
