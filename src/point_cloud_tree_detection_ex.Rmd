@@ -2353,20 +2353,21 @@ $$
 \textrm{variable window radius} = \textrm{pixel height} \times 0.1
 $$
 
-This particular variable window radius function with a minimum window size of 2m and a maximum window size of  5m has the shape:
+This particular variable window radius function (with a minimum window size of 2m and a maximum of 5m) has the shape:
 
-```{r ex-var-window, include=FALSE, eval=TRUE, fig.show='hold'}
-library(tidyverse)
+```{r ex-var-window, echo=FALSE, eval=TRUE, fig.show='asis'}
+# define function
 f_temp = function(x) {
   y = dplyr::case_when(
     is.na(x) ~ 1e-3 # requires non-null
     , x < 0 ~ 1e-3 # requires positive
     , x < 2 ~ 2 # set lower bound
-    , x > 20 ~ 5  # set upper bound
+    , x > 30 ~ 5  # set upper bound
     , TRUE ~ 2 + (x * 0.1)
   )
   return(y)
 }
+# plot
 data.frame(
   height_m = seq(0,50,2)
 ) %>% 
@@ -2378,6 +2379,7 @@ ggplot(mapping = aes(x=height_m, y=window_size_m)) +
   labs(x="Height (m)", y="Window Size (m)") + 
   scale_y_continuous(limits = c(0,6)) +
   theme_light()
+remove(list = ls()[grep("_temp",ls())])
 ```
 
 ```{r, include=FALSE, eval=FALSE}
