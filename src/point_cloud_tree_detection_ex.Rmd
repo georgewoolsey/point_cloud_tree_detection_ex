@@ -365,7 +365,7 @@ generate_grid_over_extent = function(las_ctg, desired_tile_res){
 
 Call the function to make the grid and save to disk as `parquet` file which allows for fast read/write. A key goal of the `sfarrow` package is to support inter-operability of spatial data in files between R and Python through the use of standardized metadata.
 
-<span style="color: red;">*George W. notes: this buffer is buffering each tile instead of buffering the extent and then creating the grid...which is it supposed to be for processing?*</span>
+<span style="color: red;">*G. Woolsey notes: this buffer is buffering each tile instead of buffering the extent and then creating the grid...which is it supposed to be for processing?*</span>
 
 ```{r make-grid}
 ### Generate the grid
@@ -488,7 +488,7 @@ gc()
 
 This function writes individual point cloud `laz` files for each [grid tile](#make_grid) to the disk in the "`r config$las_tile_dir`" directory. Each grid tile is buffered by the user-defined buffer and the raw point cloud is cropped to that extent. The purpose is to...??? (reduce processing time)
 
-<span style="color: red;">George W. notes: is there potential for individual trees to either be i) double-counted if crown spans multiple grid tiles; or ii) excluded when recombining tiles and removing duplicates? Not sure what the recombine process looks like yet.</span>
+<span style="color: red;">G. Woolsey notes: is there potential for individual trees to either be i) double-counted if crown spans multiple grid tiles; or ii) excluded when recombining tiles and removing duplicates? Not sure what the recombine process looks like yet.</span>
 
 ```{r tile-las-fn}
 ### New function to tile the raw point cloud to the desired grid - with buffers 
@@ -688,7 +688,7 @@ las_denoise <- lidR::filter_poi(las, Classification != LASNOISE)
 
 , where `ivf` implements an algorithm for outliers (noise) segmentation based on isolated voxels filter (IVF). The algorithm finds points that have only a few other points in their surrounding 3 x 3 x 3 = 27 voxels.
 
-<span style="color: red;">George W. notes: the point classification and height normalization procedures are using only data within the bounds of each individual tile (+buffer). How does this impact: i) classification of ground (e.g. in low point density tiles or tiles with limited canopy penetration) and the resulting normalization; ii) the detection of outlier points based on normalized height within the tile versus across the entire point cloud extent? Also, should outliers (noise) be detected and removed prior to applying the ground classification (currently is applied after at the individual grid tile level)?</span>
+<span style="color: red;">G. Woolsey notes: the point classification and height normalization procedures are using only data within the bounds of each individual tile (+buffer). How does this impact: i) classification of ground (e.g. in low point density tiles or tiles with limited canopy penetration) and the resulting normalization; ii) the detection of outlier points based on normalized height within the tile versus across the entire point cloud extent? Also, should outliers (noise) be detected and removed prior to applying the ground classification (currently is applied after at the individual grid tile level)?</span>
 
 ```{r classify-points-fn}
 ### Function to classify ground and height normalize las tiles
@@ -992,7 +992,7 @@ plot_dtm3d(dtm2)
 plot_dtm3d(dtm3)
 ```
 
-<span style="color: red;">George W. notes: none of the interpolation algorithms available in `lidR::rasterize_terrain` use single-point methods to create the DTM. As written, this program uses `lidR::rasterize_canopy` with the `p2r` algorithm set to attribute the height of the highest point found to the value of the raster tile. This could result in i) empty cells; and/or ii) a less smooth DTM which is influenced by artifact points (especially since the current outlier removal is applied only to the non-ground points *after* the classification algorithm is applied). Furthermore, as a  DTM is created for each tile separately, there is potential for edge effects to be amplified across the study extent. Calculating the DTM for each tile separately excludes valid data which would be otherwise available to the algorithm if processed altogether. A potential solution is to continue processing by grid tiles with a buffer that overlaps with neighboring tiles, use a multi-point interpolation algorithm on each buffered tile, and then combine the grid tile rasters via `terra::mosaic` where values in overlapping cells are averaged. Or, process as a single point cloud over the entire study extent.</span>
+<span style="color: red;">G. Woolsey notes: none of the interpolation algorithms available in `lidR::rasterize_terrain` use single-point methods to create the DTM. As written, this program uses `lidR::rasterize_canopy` with the `p2r` algorithm set to attribute the height of the highest point found to the value of the raster tile. This could result in i) empty cells; and/or ii) a less smooth DTM which is influenced by artifact points (especially since the current outlier removal is applied only to the non-ground points *after* the classification algorithm is applied). Furthermore, as a  DTM is created for each tile separately, there is potential for edge effects to be amplified across the study extent. Calculating the DTM for each tile separately excludes valid data which would be otherwise available to the algorithm if processed altogether. A potential solution is to continue processing by grid tiles with a buffer that overlaps with neighboring tiles, use a multi-point interpolation algorithm on each buffered tile, and then combine the grid tile rasters via `terra::mosaic` where values in overlapping cells are averaged. Or, process as a single point cloud over the entire study extent.</span>
 
 ```{r create-dtm-fn}
 # GW added
@@ -1200,7 +1200,7 @@ The process loops over each normalized point cloud grid tile and creates a Canop
 
 , where the `algorithm = p2r()` option implements an algorithm for digital surface model computation based on a points-to-raster method: for each pixel of the output raster the function attributes the height of the highest point found. The subcircle tweak replaces each point with 8 points around the original one. This allows for virtual ’emulation’ of the fact that a lidar point is not a point as such, but more realistically a disc. This tweak densifies the point cloud and the resulting canopy model is smoother and contains fewer "pits" and empty pixels. The `pkg = "terra"` results in a raster that is compatible with the `terra` package.
 
-<span style="color: red;">George W. notes: The [DTM process](#create_dtm) and CHM process both use `lidR::rasterize_canopy` with the `p2r` algorithm to attribute the height of the raster to the highest point found to the value of the raster tile. The current program: 
+<span style="color: red;">G. Woolsey notes: The [DTM process](#create_dtm) and CHM process both use `lidR::rasterize_canopy` with the `p2r` algorithm to attribute the height of the raster to the highest point found to the value of the raster tile. The current program: 
 
 1. Uses `lidR::rasterize_canopy` with the `p2r` algorithm to create a raster separately for each tile
 2. The tile raster is converted to a data frame with xyz values
@@ -1448,7 +1448,7 @@ gc()
 
 This section uses the height normalized point cloud grid tiles (created in [this section](#classify_points)) to create a CHM raster using only points between a specified height based on the program defined in [this section](#create_chm). The stem section at DBH includes points that fall between 1.2 and 1.4 meters.
 
-<span style="color: red;">George W. notes: it is unclear what this data is used for...the `las` file may be used to extract DBH measurements using the `TreeLS` package. See page 3 of [Swayze and Tinkham (2022)](https://scholar.google.com/scholar?oi=bibs&hl=en&cluster=10655866445299954513). However, it is likely that the point cloud would need to be filtered based on point color to ensure extraction of stem points and not understory (e.g. tree regeneration) points.</span>
+<span style="color: red;">G. Woolsey notes: it is unclear what this data is used for...the `las` file may be used to extract DBH measurements using the `TreeLS` package. See page 3 of [Swayze and Tinkham (2022)](https://scholar.google.com/scholar?oi=bibs&hl=en&cluster=10655866445299954513). However, it is likely that the point cloud would need to be filtered based on point color to ensure extraction of stem points and not understory (e.g. tree regeneration) points.</span>
 
 Call the function to create the *stem-only* CHM
 
@@ -1635,7 +1635,7 @@ TreeLS::tlsInventory(
   }
 ```
 
-## Define the write stem function
+## Define the stem processing function{#process_stems}
 
 This function combines `TreeLS` processing to the normalized point cloud to: 
 
@@ -1892,7 +1892,7 @@ This is an example of the full process:
 
 ### 1. Read Normalized Point Cloud
 
-```{r detect-stem-st1, webgl=FALSE, eval=T}
+```{r detect-stem-st1, webgl=FALSE, eval=F}
 # read single data tile
   las_norm_tile_temp = list.files(
       config$las_norm_tile_dir
@@ -1914,7 +1914,7 @@ plot3D::scatter3D(
 
 ### 2. Detect Stems
 
-```{r detect-stem-st2, webgl=FALSE, eval=T}
+```{r detect-stem-st2, webgl=FALSE, eval=F}
 # implement the tree detection function
 # this function is essentially TreeLS::treeMap(las, method = map.hough(...))
   treemap_temp = tree_map_function(las_norm_tile_temp)
@@ -1951,7 +1951,7 @@ plot3D::scatter3D(
 
 ### 3. Assign TreeID to Normalized Points
 
-```{r detect-stem-st3, webgl=FALSE, eval=T}
+```{r detect-stem-st3, webgl=FALSE, eval=F}
 ### Classify tree regions
   ## Assigns TreeIDs to a LAS object based on coordinates extracted from a treeMap object.
   las_norm_tile_temp = las_norm_tile_temp %>% 
@@ -1972,7 +1972,7 @@ plot3D::scatter3D(
 
 ### 4. Classify Normalized Points as Stem Points
 
-```{r detect-stem-st4, webgl=FALSE, eval=T}
+```{r detect-stem-st4, webgl=FALSE, eval=F}
 ### Classify stem points
   las_norm_tile_temp = TreeLS::stemPoints(
     las = las_norm_tile_temp
@@ -2016,7 +2016,7 @@ plot3D::scatter3D(
 
 ### 5. Estimate DBH from the Stem Points{#ex_est_dbh}
 
-```{r detect-stem-st5, webgl=FALSE, eval=T}
+```{r detect-stem-st5, webgl=FALSE, eval=F}
 ### Search through tree points and estimate DBH to return a data frame of results
   tree_inv_temp = TreeLS::tlsInventory(
     las = las_norm_tile_temp
@@ -2099,7 +2099,7 @@ This section combines these classified grid tile point clouds into a single poin
 
 ## Combine Stem Point Clouds
 
-If stem cloud points spatially overlap duplicate points are removed. This data does not contain tree ID, tree height, or tree DBH estimates. That data resides in the vector data written to the `r config$stem_poly_tile_dir` (`config$stem_poly_tile_dir`) directory as `parquet` tile files created in [this section](#detect-stems). See the example vector data [here](#ex_est_dbh). This vector data is combined in the [next section](#combine_stems_vect).
+Combine grid tile stem point clouds. This data does not contain tree ID, tree height, or tree DBH estimates. That data resides in the vector data written to the `r config$stem_poly_tile_dir` (`config$stem_poly_tile_dir`) directory as `parquet` tile files created in [this section](#detect-stems). See the example vector data [here](#ex_est_dbh). This vector data is combined in the [next section](#combine_stems_vect).
 
 ```{r combine-stems}
 ###___________________________________________________###
@@ -2183,7 +2183,7 @@ gc()
 
 Combine the vector data written to the `r config$stem_poly_tile_dir` (`config$stem_poly_tile_dir`) directory as `parquet` tile files created in [this section](#detect-stems). An example of this data is shown [here](#ex_est_dbh). This data contains tree ID, tree height, and tree DBH estimates as well as xy coordinates of the tree stems.
 
-If stem vector points spatially overlap ... ???
+**If stem vector points spatially overlap ... ???**
 
 ```{r combine-stems-vect}
 ###__________________________________________________________###
@@ -2260,7 +2260,7 @@ mapview::mapview(
 
 ## Clean the Stem Vector Data
 
-<span style="color: red;">Note!: this clean-up process uses code from the original author Neal Swayze with no edits.</span>
+<span style="color: red;">Note!: this clean-up process uses code from the original author Neal Swayze with no edits. It does not include any filtering of stems (and associated DBHs) that spatially overlap nor does it have any selection criteria for individual trees that were "cut in half" in one tile but wholly contained in another tile when the grid tiles were combined (i.e. these trees will be included twice with one "good" DBH value and one "bad" DBH).</span>
 
 The cleaning process uses the following steps:
 
@@ -2508,7 +2508,7 @@ crowns = lidR::watershed(
 plot(crowns, col = (viridis::turbo(2000) %>% sample()))
 ```
 
-<span style="color: red;">George W. notes: the `lidR::watershed` call above fails because the input CHM created in [this section](#chm_tree_detect) requires no empty raster cells. Obtaining a CHM raster with unempty cells can be accomplished using the interpolation and mosaic methods discussed in that section. Alternatively, the `lidR::segment_trees` function can be utilized with a point cloud covering the full study extent which requires a complete (non-tiled) point cloud (perhaps using the `laz` file created based off of the CHM raster and written to the disk `r config$delivery_las_dir` directory).</span>
+<span style="color: red;">G. Woolsey notes: the `lidR::watershed` call above fails because the input CHM created in [this section](#chm_tree_detect) requires no empty raster cells. Obtaining a CHM raster with unempty cells can be accomplished using the interpolation and mosaic methods discussed in that section. Alternatively, the `lidR::segment_trees` function can be utilized with a point cloud covering the full study extent which requires a complete (non-tiled) point cloud (perhaps using the `laz` file created based off of the CHM raster and written to the disk `r config$delivery_las_dir` directory).</span>
 
 Instead, the `ForestTools::mcws` marker-controlled watershed segmentation algorithm is used below and requires input of individual tree top points and a CHM raster. However, this package relies on the `raster` package which was depreciated in 2023. [Tinkham et al. (2022)]((https://scholar.google.com/scholar?cluster=14807895789640069059&hl=en&as_sdt=0,6)) used this same `ForestTools::mcws` algorithm to delineate tree crowns.
 
@@ -2555,12 +2555,20 @@ ggplot() +
   theme(legend.position = "none")
 ```
 
-## Spatial join the tree tops with the tree crowns
+## Calculate local tree competition metrics
 
-The delineated crown raster (`terra` SpatRaster) is converted to vector data (i.e. polygons) and crowns with an area smaller than the user defined crown area are removed (`r min_crown_size_m2`m in this example). The tree tops are then spatially joined with the tree crowns.
+From [Tinkham et al. (2022)](https://scholar.google.com/scholar?cluster=14807895789640069059&hl=en&as_sdt=0,6):
 
-```{r crown-tree-join}
-# add tree data to tree_tops
+*Local competition metrics, including the distance to the nearest neighbor, trees ha^−1^ within a 5 m radius, and the relative tree height within a 5 m radius, were calculated for each tree and used in the subsequent DBH modeling. A 5 m radius was selected as it represents a distance slightly less than the point at which two mature ponderosa pine trees in the region would begin to have interlocking crowns, representing a proxy for direct competition. The relative tree height within a 5 m radius was estimated using Equation (2):*
+
+$$
+\textrm{Relative Height} = \frac{\textrm{Height}}{\textrm{Height}_\textrm{max}} \times 100
+$$
+
+, where $\textrm{Height}$ is the height of the subject tree and $\textrm{Height}_\textrm{max}$ is the height of the tallest tree within a 5 m radius of the subject tree.
+
+```{r competition-metrics}
+### add tree data to tree_tops
   tree_tops = tree_tops %>% 
     # pull out the coordinates and update treeID
     dplyr::mutate(
@@ -2570,6 +2578,92 @@ The delineated crown raster (`terra` SpatRaster) is converted to vector data (i.
       , treeID = paste(treeID,round(tree_x, 1),round(tree_y, 1), sep = "_")
     )
   # str(tree_tops)
+### set buffer around tree to calculate competition metrics
+competition_buffer_temp = 5
+### how much of the buffered tree area is within the study boundary?
+  # use this to scale the TPA estimates below
+tree_tops_pct_buffer_temp = tree_tops %>% 
+  # buffer point
+  sf::st_buffer(competition_buffer_temp) %>% 
+  dplyr::mutate(
+    point_buffer_area_m2 = as.numeric(sf::st_area(.))
+  ) %>% 
+  # intersect with study bounds
+  sf::st_intersection(
+    las_ctg$geometry
+  ) %>% 
+  # calculate area of buffer within study
+  dplyr::mutate(
+    buffer_area_in_study_m2 = as.numeric(sf::st_area(.))
+  ) %>% 
+  sf::st_drop_geometry() %>% 
+  dplyr::select(treeID, buffer_area_in_study_m2)
+
+### use the tree top location points to get competition metrics
+comp_tree_tops_temp = tree_tops %>% 
+  # buffer point
+  sf::st_buffer(competition_buffer_temp) %>% 
+  dplyr::select(treeID, tree_height_m) %>% 
+  # spatial join with all tree points
+  sf::st_join(
+    tree_tops %>% 
+      dplyr::select(treeID, tree_height_m) %>% 
+      dplyr::rename_with(
+        .fn = ~ paste0("comp_",.x)
+        , .cols = tidyselect::everything()[
+            -dplyr::any_of(c("geometry"))
+          ]
+      )
+  ) %>%
+  sf::st_drop_geometry() %>% 
+  # calculate metrics by treeID
+  dplyr::group_by(treeID,tree_height_m) %>% 
+  dplyr::summarise(
+    n_trees = dplyr::n()
+    , max_tree_height_m = max(comp_tree_height_m)
+  ) %>% 
+  dplyr::ungroup() %>% 
+  dplyr::inner_join(
+    tree_tops_pct_buffer_temp
+    , by = dplyr::join_by("treeID")
+  ) %>% 
+  dplyr::mutate(
+    comp_trees_per_ha = (n_trees/buffer_area_in_study_m2)*10000
+    , comp_relative_tree_height = tree_height_m/max_tree_height_m*100
+  ) %>% 
+  dplyr::select(
+    treeID, comp_trees_per_ha, comp_relative_tree_height
+  )
+### calculate distance to nearest neighbor
+dist_tree_tops_temp = tree_tops %>% 
+  sf::st_distance(tree_tops, by_element = F) %>% 
+  dplyr::as_tibble() %>% 
+  dplyr::mutate(row_n=dplyr::row_number()) %>% 
+  tidyr::pivot_longer(
+    cols = starts_with("V")
+    , names_to = "comp"
+    , names_prefix = "V"
+    , values_to = "comp_dist_to_nearest_m"
+    , values_drop_na = T
+  ) %>% 
+  dplyr::filter(
+    row_n!=comp
+  ) %>% 
+  dplyr::mutate(comp_dist_to_nearest_m = as.numeric(comp_dist_to_nearest_m)) %>% 
+  dplyr::group_by(row_n) %>% 
+  dplyr::summarise(comp_dist_to_nearest_m = min(comp_dist_to_nearest_m, na.rm = T)) %>% 
+  dplyr::ungroup() %>% 
+  dplyr::arrange(row_n) %>% 
+  dplyr::select(-c(row_n))
+
+### join with original tree tops data
+tree_tops = tree_tops %>% 
+  dplyr::left_join(
+    comp_tree_tops_temp
+    , by = dplyr::join_by("treeID")
+  ) %>% 
+  # add distance
+  dplyr::bind_cols(dist_tree_tops_temp)
 
 ### Write the trees to the disk
   sf::st_write(
@@ -2578,6 +2672,38 @@ The delineated crown raster (`terra` SpatRaster) is converted to vector data (i.
     , quiet = TRUE, append = FALSE
   )
 
+```
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE, include=FALSE}
+remove(list = ls()[grep("_temp",ls())])
+gc()
+```
+
+Map tree competition metrics
+
+```{r plt-competition-metrics}
+# trees per ha
+tree_tops %>% 
+  ggplot() + 
+    geom_sf(mapping = aes(fill = comp_trees_per_ha), shape = 21, alpha = 0.8, size = 2, color = "gray77") +
+    scale_fill_viridis_c() +
+    labs(fill = "trees\nper ha") +
+    theme_light()
+# distance to nearest neighbor
+tree_tops %>% 
+  ggplot() + 
+    geom_sf(mapping = aes(fill = comp_dist_to_nearest_m), shape = 21, alpha = 0.8, size = 2, color = "gray77") +
+    scale_fill_viridis_c(option="rocket", direction = -1) +
+    labs(fill = "meters to\nnearest\nneighbor") +
+    theme_light()
+```
+
+
+## Spatial join the tree tops with the tree crowns
+
+The delineated crown raster (`terra` SpatRaster) is converted to vector data (i.e. polygons) and crowns with an area smaller than the user defined crown area are removed (`r min_crown_size_m2`m in this example). The tree tops are then spatially joined with the tree crowns.
+
+```{r crown-tree-join}
 ### Convert crown raster to terra rast, then polygons, then to Sf
 crowns_sf = crowns %>% 
   # convert raster to polygons for each individual crown
@@ -2607,11 +2733,12 @@ crowns_sf = crowns %>%
 ### Join the crowns with the seeds to append data, remove Nulls
 crowns_sf = crowns_sf %>%
   sf::st_join(tree_tops) %>% 
-  dplyr::select(
+  dplyr::select(c(
     "treeID", "tree_height_m"
     , "tree_x", "tree_y"
     , "crown_area_m2"
-  )
+    , tidyselect::starts_with("comp_")
+  ))
   
   # str(crowns_sf)
   # crowns_sf %>% dplyr::count(treeID) %>% nrow()
@@ -2704,7 +2831,7 @@ This step is distinct from the tree crown delineation in the [prior section](#cr
 
 Instead, this section uses the stems detected using the `TreeLS` [workflow in this section](#detect-stems) to delineate tree crown vector (i.e. polygon) shapes.
 
-<span style="color: red;">George W. notes: It is unclear if this step is necessary. It seems like the "master" tree list should be based on the overhead tree identification using the CHM data. This "master" tree list can be spatially joined to the stems detected in the `TreeLS` workflow to attach DBH estimates. If more than one stem location is attached to a single tree from the master list, then the best DBH estimate can be selected based on the process outlined in [Swayze and Tinkham (2022)](https://scholar.google.com/scholar?oi=bibs&hl=en&cluster=10655866445299954513). Perhaps this happens later?</span>
+<span style="color: red;">G. Woolsey notes: It is unclear if this step is necessary. It seems like the "master" tree list should be based on the overhead tree identification using the CHM data. This "master" tree list can be spatially joined to the stems detected in the `TreeLS` workflow to attach DBH estimates. If more than one stem location is attached to a single tree from the master list, then the best DBH estimate can be selected based on the process outlined in [Swayze and Tinkham (2022)](https://scholar.google.com/scholar?oi=bibs&hl=en&cluster=10655866445299954513). Perhaps this happens later?</span>
 
 ```{r crowns-treels}
 ### Use the stems detected using TreeLS::treeMap to delineate crowns using MCWS from ForestTools
@@ -2844,8 +2971,395 @@ ggplot() +
   theme_light() 
 ```
 
-<span style="color: red;">George W. notes: this crown delineation methodology results in crown areas that are highly improbably. [Creasy et al. (2021)](https://scholar.google.com/scholar?cluster=10356932785437169630&hl=en&as_sdt=0,6) measured crown areas of 163.8 (+/- 81.4) m2. Hopefully this crown delineation is not utilized in any following analysis.</span>
+<span style="color: red;">G. Woolsey notes: this crown delineation methodology results in crown areas that are highly improbable. [Creasy et al. (2021)](https://scholar.google.com/scholar?cluster=10356932785437169630&hl=en&as_sdt=0,6) measured crown areas of 163.8 (+/- 81.4) m^2^. Hopefully this crown delineation is not utilized in any following analysis.</span>
 
+```{r, warning=FALSE, message=FALSE, echo=FALSE, include=FALSE}
+remove(list = ls()[grep("_temp",ls())])
+gc()
+```
+
+# Model Missing DBH's{#model_dbhs}
+
+[Tinkham et al. (2022)](https://scholar.google.com/scholar?cluster=14807895789640069059&hl=en&as_sdt=0,6) evaluated five models in the form of simple linear, multiple linear, and three non-linear model structures to estimate missing tree DBH values based on allometric relationships to independent variables including tree height using the sample of UAS SfM point cloud derived DBH values (i.e. from trees where DBH could be detected using aerial point cloud data alone). For the ponderosa pine forest studied, the simple linear form ($DBH_i = \beta_0 + \beta_1 \cdot Height_i$, where $i$ is the individual tree estimate from UAS SfM data) resulted in the best predictive model for both tree and stand level summarizations after first filtering SfM DBHs estimates using regionally derived height to DBH allometries from US Forest Inventory and Analysis (FIA) data. 
+
+This section uses the sample of DBH values extracted from the point cloud ([example here](#ex_est_dbh)) in the [Detect Stems section](#detect-stems) to create a model using the SfM extracted height, crown area, and competition metrics as independent variables, and the SfM-derived DBH as the dependent variable.
+
+The DBH filtering methodology described by [Tinkham et al. (2022)](https://scholar.google.com/scholar?cluster=14807895789640069059&hl=en&as_sdt=0,6) is *not* applied here:
+
+*This filtering used local Forest Inventory and Analysis (FIA) data from the study region to develop...a model representing the regional height to DBH relationship. This model used FIA data from Colorado with greater than 70% ponderosa pine by basal area, densities exceeding 10 m^2^ ha^−1^ basal area represented untreated conditions, and site indices within 3 m of the study site’s estimated site index of 22 m at a base age of 100 years were used to maintain a similar height to DBH relationship. Based on the results from Swayze et al. (2021), the model was fit as a second order polynomial using the stats R package. Subsequently, Equation (3) was applied to predict a regionally expected DBH value for each tree height. For trees with multiple SfM-derived DBH values, we compared each estimate to the predictions from Equation (3) and retained the SfM-derived DBH with the smallest error*
+
+Equation 3:
+$$
+\textrm{DBH (cm)} = 1.6121 \times \textrm{Height (m)} + \textrm{Height (m)}^{0.0276}
+$$
+
+## Join CHM derived Crowns with DBH stems
+
+Spatially join the tree crown polygons created based off of the CHM in [this section](#crown_delin) with the tree stems where DBH was detected created in [this section](#process_stems).
+
+```{r crowns-to-dbhs}
+###________________________________________________________###
+### Join the Top down crowns with the stem location points ###
+###________________________________________________________###
+  ### Join the top down crowns with the stem location points
+  ## !! Note that one crown can have multiple stems within its bounds
+  crowns_sf_joined_stem_locations = crowns_sf %>%
+    sf::st_join(
+      dbh_locations_sf %>% 
+        # rename all columns to have "stem" prefix
+        dplyr::rename_with(
+          .fn = ~ paste0("stem_",.x,recycle0 = T)
+          , .cols = tidyselect::everything()[
+            -dplyr::any_of(
+              c(tidyselect::starts_with("stem_x"),"geometry")
+            )
+          ]
+        )
+    )
+  # str(crowns_sf_joined_stem_locations)
+###________________________________________________________###
+### Check for row uniqueness ###
+###________________________________________________________###
+  crowns_sf_joined_stem_locations %>% 
+    sf::st_drop_geometry() %>% 
+    dplyr::summarise(
+      n = dplyr::n()
+      , n_unique_crowns = dplyr::n_distinct(treeID)
+    ) %>% 
+    kableExtra::kbl() %>% 
+    kableExtra::kable_styling()
+```
+
+```{r, include=FALSE, eval=FALSE}
+# check this data
+# trees with multiple stems?
+  crowns_sf_joined_stem_locations %>% 
+    sf::st_drop_geometry() %>% 
+    dplyr::filter(!is.na(stem_radius_m)) %>% 
+    dplyr::group_by(treeID) %>% 
+    dplyr::summarise(
+      n_distinct_stems = dplyr::n_distinct(stem_treeID)
+    ) %>% 
+    dplyr::filter(n_distinct_stems>1) %>% 
+    dplyr::arrange(desc(n_distinct_stems)) %>% 
+    dplyr::slice_head(n = 20)
+# stems to multiple trees?
+  crowns_sf_joined_stem_locations %>% 
+    sf::st_drop_geometry() %>% 
+    dplyr::filter(!is.na(stem_radius_m)) %>% 
+    dplyr::group_by(stem_treeID) %>% 
+    dplyr::summarise(
+      n_distinct_trees = dplyr::n_distinct(treeID)
+    ) %>% 
+    dplyr::filter(n_distinct_trees>1) %>% 
+    dplyr::arrange(desc(n_distinct_trees)) %>% 
+    dplyr::slice_head(n = 20)
+# plot
+crowns_sf_joined_stem_locations %>% 
+    dplyr::filter(!is.na(stem_radius_m)) %>% 
+    dplyr::group_by(treeID) %>% 
+    dplyr::summarise(
+      n_distinct_stems = dplyr::n_distinct(stem_treeID)
+    ) %>% 
+    dplyr::filter(n_distinct_stems>1) %>% 
+  ggplot() +
+    geom_sf(mapping=aes(fill = treeID)) +
+    geom_sf_text(mapping=aes(label = n_distinct_stems), hjust = -1) +
+    scale_fill_viridis_d() +
+    labs(x="",y="") +
+    theme_light() +
+    theme(legend.position = "none")
+```
+
+## Filter the SfM DBHs{#filter_dbhs}
+
+<span style="color: red;">G. Woolsey added section. There was no DBH filtering done in the original script handed off by N. Swayze. Instead, the model to estimate missing DBHs was built off of all stems with DBH values created in {this section}(#combine_stems_vect). There are a few potential pitfalls with this methodology. First, the stems and DBH estimates were made separately for each grid tile and then combined with no filtering for stems (and associated DBH estimates) that were "cut in half" at the grid tile boundary. There was also no filtering for stems that overlap when the [grid tiles were combined](#combine_stems_vect).</span>
+
+Filter using allometric Equation 3 from [Tinkham et al. (2022)](https://scholar.google.com/scholar?cluster=14807895789640069059&hl=en&as_sdt=0,6): 
+
+$$
+\textrm{DBH (cm)} = 1.6121 \times \textrm{Height (m)} + \textrm{Height (m)}^{0.0276}
+$$
+Filtering steps implemented here (which do not match methods represented in the literature...but better than nothing):
+
+1) Predict an expected DBH value for each [CHM derived tree height](#chm_tree_detect)
+2) Remove stem DBH estimates that are not within 25% of this value
+3) Select the stem DBH estimate that is closest to the predicted DBH value (from 1) if multiple stems are within the bounds of one crown
+
+```{r filter-dbhs}
+# define allometric relationship
+  allometric_dbh_fn = function(height_m){
+    dbh_est_cm = (1.6121 * height_m) + (height_m^0.0276)
+    return(dbh_est_cm)
+  }
+# plot allometric relationship
+  data.frame(
+    height_m = seq(0,50,2)
+  ) %>% 
+  dplyr::mutate(
+    dbh_est_cm = allometric_dbh_fn(height_m)
+  ) %>% 
+  ggplot(mapping = aes(x=height_m, y=dbh_est_cm)) + 
+    geom_line() + 
+    labs(x="Height (m)", y="DBH est. (cm)", title = "Estimated DBH (cm) based on allometric relationship to height (m)") + 
+    theme_light()
+# attach allometric data to CHM derived trees and canopy data
+crowns_sf_joined_stem_locations = crowns_sf_joined_stem_locations %>% 
+  dplyr::mutate(
+    est_dbh_cm = allometric_dbh_fn(tree_height_m)
+    , est_dbh_pct_diff = abs(stem_dbh_cm-est_dbh_cm)/est_dbh_cm
+  )
+  # what is the estimated difference
+  # summary(crowns_sf_joined_stem_locations$est_dbh_pct_diff)
+# build training data set
+dbh_training_dataset = crowns_sf_joined_stem_locations %>%
+  sf::st_drop_geometry() %>% 
+  dplyr::filter(
+    !is.na(stem_dbh_cm)
+    & est_dbh_pct_diff <= 0.25
+  ) %>% 
+  dplyr::group_by(treeID) %>% 
+  dplyr::filter(
+    est_dbh_pct_diff==min(est_dbh_pct_diff)
+  ) %>% 
+  dplyr::ungroup() %>% 
+  dplyr::select(c(
+    treeID # id
+    , stem_dbh_cm # y
+    # x vars
+    , crown_area_m2, tree_height_m
+    , median_crown_ht_m, mean_crown_ht_m, min_crown_ht_m
+    , tidyselect::starts_with("comp_")
+  ))
+# dbh_training_dataset %>% dplyr::glimpse()
+```
+
+View correlation matrix of potential predictor variables
+
+```{r x-var-corr}
+# correlation matrix of potential predictors
+dbh_training_dataset %>% 
+  dplyr::select(-c(treeID,stem_dbh_cm)) %>% 
+  cor() %>% 
+  corrplot::corrplot(type = "lower", diag = F)
+# remove highly correlated predictors
+dbh_training_dataset = dbh_training_dataset %>% 
+  dplyr::select(c(
+    treeID # id
+    , stem_dbh_cm # y
+    # x vars
+    , crown_area_m2, tree_height_m
+    , min_crown_ht_m
+    , tidyselect::starts_with("comp_")
+  ))
+
+```
+
+## Model to estimate missing DBHs{#model_run}
+
+[Tinkham et al. (2022)](https://scholar.google.com/scholar?cluster=14807895789640069059&hl=en&as_sdt=0,6) found the simple linear form ($DBH_i = \beta_0 + \beta_1 \cdot Height_i$, where $i$ is the individual tree estimate from UAS SfM data), resulted in the best estimates for both tree and stand level summarizations. However, this workflow uses a random forest model with the `randomForest` package to estimate DBH based on the sample of DBH values extracted from the point cloud ([example here](#ex_est_dbh)) in the [Detect Stems section](#detect-stems).
+
+The random forest model is "tuned" using the `randomForest::tuneRF` function to determine the optimal `mtry` hyperparameter. The `mtry` parameter represents the number of variables to randomly sample as candidates at each split (view [more detail here](https://uc-r.github.io/random_forests)). The `randomForest::tuneRF` function will start at a default value of `mtry` and increase by a certain step factor until the Out-of-bag (OOB) error stops improving by a specified amount. For example, the below starts with the default `mtry` and increases by a factor of 0.5 until the OOB error stops improving by 1%.
+
+```{r model-dbhs}
+set.seed(23)
+# dbh_training_dataset %>% dplyr::glimpse()
+
+### tuning RF model
+  # If we are interested with just starting out and tuning the mtry parameter 
+  # we can use randomForest::tuneRF for a quick and easy tuning assessment. 
+  # tuneRf will start at a value of mtry that you supply and increase by a 
+  # certain step factor until the OOB error stops improving be a specified amount.
+  rf_tune_temp = randomForest::tuneRF(
+    y = dbh_training_dataset$stem_dbh_cm
+    , x = dbh_training_dataset %>% dplyr::select(-c(treeID,stem_dbh_cm))
+    , stepFactor = 0.5
+    , ntreeTry = 500
+    , mtryStart = 0.5
+    , improve = 0.01
+    , plot = F
+    , trace = F
+  )
+  # rf_tune_temp
+
+### Run a randomForest model to predict DBH using various crown predictors
+  stem_prediction_model = randomForest::randomForest(
+    y = dbh_training_dataset$stem_dbh_cm
+    , x = dbh_training_dataset %>% dplyr::select(-c(treeID,stem_dbh_cm))
+    , mtry = rf_tune_temp %>% 
+        dplyr::as_tibble() %>% 
+        dplyr::filter(OOBError==min(OOBError)) %>% 
+        dplyr::pull(mtry)
+    , na.action = na.omit
+  )
+  # stem_prediction_model
+  # str(stem_prediction_model)
+```
+
+### Model performance 
+
+Random forest variable importance plot
+
+```{r model-dbhs-rslt1}
+#variable importance plot
+randomForest::varImpPlot(stem_prediction_model, main = "RF variable importance plot for DBH estimate")
+```
+
+Estimated versus observed DBH
+
+```{r model-dbhs-rslt2}
+data.frame(
+  dbh_training_dataset
+  , predicted = stem_prediction_model$predicted
+  , mse = stem_prediction_model$mse
+  , rsq = stem_prediction_model$rsq
+) %>% 
+ggplot() +
+  geom_abline() +
+  geom_point(mapping = aes(x = stem_dbh_cm, y = predicted)) +
+  scale_x_continuous(limits = c(0,max(dbh_training_dataset$stem_dbh_cm)*1.05)) +
+  scale_y_continuous(limits = c(0,max(dbh_training_dataset$stem_dbh_cm)*1.05)) +
+  labs(
+    x = "SfM DBH (cm)"
+    , y = "Predicted DBH (cm) by RF"
+  ) +
+  theme_light()
+```
+
+Table of model performance
+
+```{r model-dbhs-rslt3}
+data.frame(
+  mae = Metrics::mae(dbh_training_dataset$stem_dbh_cm, stem_prediction_model$predicted)
+  , mape = Metrics::mape(dbh_training_dataset$stem_dbh_cm, stem_prediction_model$predicted) %>% 
+    scales::percent(accuracy = .01)
+  , rmse = Metrics::rmse(dbh_training_dataset$stem_dbh_cm, stem_prediction_model$predicted)
+) %>% 
+  kableExtra::kbl(
+    caption = "Random forest model prediction performance for DBH (cm)"
+    , col.names = c(
+      "Mean Abs. Error (cm)"
+      , "Mean Abs. Percent Error"
+      , "Root Mean Squared Error (cm)"
+    )
+    , digits = 2
+  ) %>% 
+  kableExtra::kable_styling()
+```
+
+## Predict missing DBHs
+
+Use the model built in the [prior section](#model_run) to estimate DBH for all trees with missing values.
+
+The final result is a vector dataset of tree crowns created in [this section]{#crown_delin} with DBH values for: i) the training data based on the DBH values extracted from the point cloud in the [Detect Stems section](#detect-stems) that passed the [DBH filtering process](#filter_dbhs); and ii) DBH values for all other trees using [predicted DBH values](#model_run) based on SfM-derived DBH and height allometries.
+
+```{r predict-dbhs}
+###___________________________________________________________________###
+### Predict missing radius values for the top down crowns with no DBH ###
+###___________________________________________________________________###
+crowns_sf_predict_only_temp = crowns_sf %>%
+  sf::st_drop_geometry() %>% 
+  dplyr::anti_join(
+    dbh_training_dataset
+    , by = dplyr::join_by("treeID")
+  ) %>% 
+  dplyr::select(
+    dbh_training_dataset %>% dplyr::select(-c(stem_dbh_cm)) %>% names()
+  )
+# get predicted dbh
+predicted_dbh_cm_temp = predict(
+  stem_prediction_model
+  , crowns_sf_predict_only_temp %>% dplyr::select(-treeID)
+)
+# summary(predicted_dbh_cm_temp)
+## combine predicted data with training data for full data set for all tree crowns with a matched tree top
+crowns_sf_with_dbh = crowns_sf %>% 
+  # join training data
+  dplyr::left_join(
+    dbh_training_dataset %>% 
+      dplyr::mutate(is_training_data = T) %>% 
+      dplyr::select(treeID, is_training_data, stem_dbh_cm)
+    , by = dplyr::join_by("treeID")
+  ) %>% 
+  # join with predicted data estimates
+  dplyr::left_join(
+    crowns_sf_predict_only_temp %>% 
+      dplyr::mutate(
+        predicted_dbh_cm = predicted_dbh_cm_temp
+      ) %>% 
+      dplyr::select(treeID, predicted_dbh_cm)
+    , by = dplyr::join_by("treeID")
+  ) %>% 
+  # clean up data and calculate metrics from dbh
+  dplyr::mutate(
+    is_training_data = dplyr::coalesce(is_training_data,F)
+    , dbh_cm = dplyr::coalesce(stem_dbh_cm, predicted_dbh_cm)
+    , dbh_m = dbh_cm/100
+    , radius_m = dbh_m/2
+    , basal_area_m2 = pi * (radius_m)^2
+    , basal_area_ft2 = basal_area_m2 * 10.764
+  )
+# write the data to the disk
+  sf::st_write(
+    crowns_sf_with_dbh
+    , paste0(config$delivery_spatial_dir, "/final_stem_locations.gpkg")
+    , append = FALSE
+    , quiet = TRUE
+  )
+```
+
+Histogram of estimated DBH values
+
+```{r est-dbh-hist}
+### plot
+  ggplot(data = crowns_sf_with_dbh) +
+    geom_histogram(
+      mapping = aes(x=dbh_cm)
+      , fill = "navy"
+      , color = "gray"
+    ) + 
+    labs(
+      x = "DBH (cm)"
+      , y = "# Obs."
+      , title = "Distribution of tree DBH"
+    ) +
+    theme_light()
+```
+
+Relationship between height and DBH
+
+```{r est-dbh-ht}
+### plot
+  ggplot(
+    data = crowns_sf_with_dbh
+    , mapping = aes(y=tree_height_m, x = dbh_cm)
+  ) +
+  # geom_smooth(
+  #   method = "lm"
+  #   # , formula = y ~ x + (x^2)
+  #   , color = "gray33"
+  # ) +
+  geom_smooth(
+    method = "loess"
+    , color = "gray33"
+  ) +
+  geom_point(
+    mapping = aes(color = is_training_data)  
+    , alpha = 0.6
+  ) + 
+  
+  labs(
+    x = "DBH (cm)"
+    , y = "Tree Ht. (m)"
+    , color = "Training Data"
+  ) +
+  scale_color_manual(values = c("gray", "firebrick")) +
+  theme_light() +
+  theme(
+    legend.position = "top"
+    , legend.direction = "horizontal"
+  )
+```
 
 ---
 
@@ -2854,144 +3368,6 @@ ggplot() +
 ###__________________________###
 ### FUNCTIONS IN DEVELOPMENT ###
 ###__________________________###
-
-### Detect trees using bottom up seeds and top down seeds 
-wrapper_hybrid_crown_delineation_missing_dbh_prediction = function(config){
-  
-  ###_________________________________________###
-  ### Detect tree tops using top down methods ###
-  ###_________________________________________###
-  
-  master_start_time = Sys.time()
-  setwd(config$working_spatial_dir)
-  message("Reading in the top down detected crowns ... ")
-  top_down_crowns = sf::st_read("top_down_detected_crowns.gpkg", quiet = TRUE)
-  
-  ###__________________________________________###
-  ### Detect tree tops using bottom up methods ###
-  ###__________________________________________###
-  
-  setwd(config$working_spatial_dir)
-  message("Reading in the bottom up detected crowns ... ")
-  bottom_up_crowns = sf::st_read("bottom_up_detected_crowns.gpkg", quiet = TRUE)
-  
-  ### Read in the stem locations 
-  setwd(config$working_spatial_dir)
-  message("Reading in the stem locations ... ")
-  stem_locations = sf::st_read("bottom_up_detected_stem_locations.gpkg", quiet = TRUE)
-  
-  ###________________________________________________________###
-  ### Join the Top down crowns with the stem location points ###
-  ###________________________________________________________###
-  
-  ### Join the top down crowns with the stem location points
-  print(paste0("Combining top down crowns with stem locations ... "))
-  top_down_crowns_joined_stem_locations = sf::st_join(top_down_crowns, stem_locations)
-  
-  ### Get the top down crowns without stems
-  top_down_crowns_no_stems = top_down_crowns_joined_stem_locations[is.na(top_down_crowns_joined_stem_locations$radius_m),]
-  top_down_crowns_no_stems
-  
-  ###_________________________________________________###
-  ### Generate Local Model of DBH - crown area/height ###
-  ###_________________________________________________###
-  
-  ### Prepare training dataset for RF modeling
-  print(paste0("Preparing to model missing stem locations ... "))
-  bottom_up_crowns_no_geom = sf::st_drop_geometry(bottom_up_crowns)
-  training_dataset = subset(bottom_up_crowns_no_geom, select = c(radius_m, crown_area_m2, tree_height_m, 
-                                                                 mean_crown_ht_m, median_crown_ht_m, min_crown_ht_m))
-  
-  ### Run a randomForest model to predict DBH using various crown predictors
-  print(paste0("Running random forest model to predict radius_m for crowns ... "))
-  stem_prediction_model = randomForest::randomForest(radius_m ~ ., data = training_dataset)
-  stem_prediction_model
-  plot(stem_prediction_model$predicted ~ training_dataset$radius_m)
-  rmse = Metrics::rmse(training_dataset$radius_m, stem_prediction_model$predicted)
-  mae = Metrics::mae(training_dataset$radius_m, stem_prediction_model$predicted)
-  print(paste0("Radius Model has a root mean square error of ", rmse*100, " cm ... "))
-  print(paste0("Radius Model has a mean absoulte error of ", mae*100, " cm ... "))
-  
-  ###___________________________________________________________________###
-  ### Predict missing radius values for the top down crowns with no DBH ###
-  ###___________________________________________________________________###
-  
-  ### Predict the missing radius values 
-  print(paste0("Predicting missing radius values for top down crowns with no stems ... "))
-  top_down_crowns_no_stems_no_geom = sf::st_drop_geometry(top_down_crowns_no_stems)
-  prediction_dataset = subset(top_down_crowns_no_stems_no_geom, select = c(crown_area_m2, tree_height_m.x, mean_crown_ht_m,median_crown_ht_m, min_crown_ht_m))
-  colnames(prediction_dataset) = c("crown_area_m2", "tree_height_m", "mean_crown_ht_m", "median_crown_ht_m", "min_crown_ht_m")
-  radius_m = predict(stem_prediction_model, prediction_dataset)
-  radius_m
-  
-  ###_____________________________________________________________###
-  ### Engineer missing features for top down crowns with no stems ###
-  ###_____________________________________________________________###
-  
-  ### Replace the new radius values and derivatives in place of NULL data
-  print(paste0("Generating additional features for top down crowns with no stems ... "))
-  radius_error_m = "NA"
-  dbh_m = radius_m*2
-  dbh_cm = dbh_m*100
-  basal_area_m2 = pi * (radius_m)^2
-  basal_area_ft2 = basal_area_m2 * 10.764
-  
-  ### Replace the missing data for 
-  top_down_crowns_no_stems$radius_m = radius_m
-  top_down_crowns_no_stems$radius_error_m = radius_error_m
-  top_down_crowns_no_stems$dbh_m = dbh_m
-  top_down_crowns_no_stems$dbh_cm = dbh_cm
-  top_down_crowns_no_stems$basal_area_m2 = basal_area_m2
-  top_down_crowns_no_stems$basal_area_ft2 = basal_area_ft2
-  top_down_crowns_no_stems_centroids = sf::st_centroid(top_down_crowns_no_stems)
-  top_down_crowns_no_stems$condition = rep("predicted_stem", nrow(top_down_crowns_no_stems_centroids))
-  
-  ###__________________________________________________________________###
-  ### Create fake stem locations for the top down crowns with no stems ###
-  ###__________________________________________________________________###
-  
-  print(paste0("Generating predicted stem locations ... "))
-  top_down_crowns_no_stems_predicted_stem_coords = data.frame(sf::st_coordinates(top_down_crowns_no_stems_centroids))
-  treeID = paste0(round(top_down_crowns_no_stems_predicted_stem_coords$X,1), "_", round(top_down_crowns_no_stems_predicted_stem_coords$Y,1))
-  condition = rep("predicted_stem", nrow(top_down_crowns_no_stems_centroids))
-  predicted_stem_locations = subset(top_down_crowns_no_stems_centroids, select = c(tree_height_m.x, radius_m,radius_error_m, dbh_m, dbh_cm, basal_area_m2, basal_area_ft2))
-  predicted_stem_locations = cbind(treeID, predicted_stem_locations, condition)
-  predicted_stem_locations = sf::st_as_sf(predicted_stem_locations)
-  predicted_stem_locations
-  
-  ### Write the predicted stem locations to the disk
-  setwd(config$working_spatial_dir)
-  sf::st_write(predicted_stem_locations, dsn = "predicted_stem_locations.gpkg", append = FALSE, quiet = TRUE)
-  predicted_stem_locations = sf::st_read("predicted_stem_locations.gpkg", quiet = TRUE)
-  predicted_stem_locations
-  
-  ###___________________________________________________________________________________________________________###
-  ### Re-run the bottom up crown delineation using the predicted stem locations and the detected stem locations ###
-  ###___________________________________________________________________________________________________________###
-  
-  ### Combine the predicted and detected stem locations
-  stem_locations = subset(stem_locations, select = -c(stem_x, stem_y))
-  colnames(predicted_stem_locations) = c("treeID", "tree_height_m", "radius_m", "radius_error_m", "dbh_m", "dbh_cm", "basal_area_m2", "basal_area_ft2", "condition", "geom")
-  combined_stem_locations = rbind(stem_locations, predicted_stem_locations)
-  
-  ### Buffer the combined stem locations by Radius_m
-  combined_stem_locations_buff = sf::st_buffer(combined_stem_locations, dist = combined_stem_locations$radius_m)
-  
-  ###_________________________###
-  ### Write files to the disk ###
-  ###_________________________###
-  
-  print(paste0("Writing spatial files to the disk ... "))
-  setwd(config$delivery_spatial_dir)
-  sf::st_write(combined_stem_locations_buff, "final_stem_locations_dbh.gpkg", append = FALSE, quiet = TRUE)
-  sf::st_write(combined_stem_locations, "final_stem_locations.gpkg", append = FALSE, quiet = TRUE)
-  
-  ### Get the total function time
-  master_end_time = Sys.time()
-  master_total_time = difftime(master_end_time, master_start_time, units = c("mins"))
-  print(paste0("Total stem seed hybridization complete in ", master_total_time, " minutes ..."))
-  
-}
 
 ### New function to detect crowns bottom up, independent from main pipeline
 detect_final_crowns = function(config, desired_chm_res, window_size, minimum_height, min_crown_size_m2){
