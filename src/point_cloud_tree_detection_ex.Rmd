@@ -16,6 +16,18 @@ knit: (function(inputFile, encoding){
   })
 ---
 
+```{r, include=FALSE, eval=FALSE, echo=FALSE}
+Attached are two scripts that feed into each other, along with the FIA data:
+  
+FIA Prediction Interval: this should take FIA data downloaded from the DataMart, filter it based on some user parameters, and then generate the prediction interval. We could look at using the rFIA package for R to streamline the data import, users would just define the state the data comes and it should just plug in for my read.csv.
+
+Filter UAS DBHs with FIA Prediction Interval: This will filter the detected DBH and height data pairs and eliminate any DBH values that are outside the 90% prediction bounds.
+ 
+I like the bounding statement you used for the variable search window for tree detection. I do think we probably want this in the user-defined section so that it is easy to adjust.
+
+Looking at the MCWS for canopy delineation, Neal implements a minimum crown area of like 2 m^2, this seems stupid to me and I think we should just eliminate it.
+```
+
 # Introduction
 
 This script processes point cloud data in `las` or `laz` file format from Lidar or UAS structure from motion (SfM) data collection systems. Products created include:
@@ -162,7 +174,7 @@ desired_buffer_size = 10
 ### Set the maximum height for the canopy height model
 max_height_threshold = 60
 ### Set the desired raster resolution in metres for the canopy height model
-desired_chm_res = 1
+desired_chm_res = 0.25
 
 ### Set the maximum height for the stem-only canopy height model
 max_stem_height_threshold = 60
@@ -171,14 +183,10 @@ max_stem_height_threshold = 60
 window_size = 3.5
 
 ### Set the minimum height (m) for individual tree detection in `lidR::locate_trees`
-minimum_tree_height = 1.37
-
-### Set the minimum crown size (m^2) to be retained after delineation
-min_crown_size_m2 = 0.1
+minimum_tree_height = 2
 
 ### Set the maximum dbh size (meters)
 dbh_max_size_m = 1.5
-
 
 # !!!!!!!!!!!!!!!!!!!!!!! USER-DEFINED PARAMETERS !!!!!!!!!!!!!!!!!!!!!!! #
 ```
@@ -342,7 +350,7 @@ Map point cloud extent
 # mapview
 mapview::mapviewOptions(
   homebutton = FALSE
-  , basemaps = c("OpenStreetMap","Esri.WorldImagery")
+  , basemaps = c("Esri.WorldImagery","OpenStreetMap")
 )
 mapview::mapview(las_ctg@data$geometry, color = "black", col.regions = "blue", lwd = 3, alpha.regions = 0.3, legend = F, label = F)
 ```
@@ -2301,7 +2309,7 @@ This section utilizes the Canopy Height Model (CHM) raster created in [this sect
 
 *Individual tree detection (ITD) is the process of spatially locating trees and extracting height information. Individual tree segmentation (ITS) is the process of individually delineating detected trees. In `lidR`, detecting and segmenting functions are decoupled to maximize flexibility. Tree tops are first detected using the `locate_trees()` function, followed crown delineation using `segment_trees()`.*
 
-The CHM is used to perform individual tree detection using the `lidR::locate_trees` function with the `lmf` algorithm which implements a local maximum filter based on the window size (`ws`) parameter with a minimum tree height (`hmin`) parameter of 1.37m. The window size can be fixed or variable and its shape can be square or circular. 
+The CHM is used to perform individual tree detection using the `lidR::locate_trees` function with the `lmf` algorithm which implements a local maximum filter based on the window size (`ws`) parameter with a minimum tree height (`hmin`) parameter of 2 m. The window size can be fixed or variable and its shape can be square or circular. 
 
 The individual tree detection algorithm recommended in [Swayze and Tinkham (2022)](https://scholar.google.com/scholar?oi=bibs&hl=en&cluster=10655866445299954513) is a local maximum variable window function based on research in ponderosa pine (*Pinus ponderosa*) forests by [Creasy et al. (2021)](https://scholar.google.com/scholar?cluster=10356932785437169630&hl=en&as_sdt=0,6) and [Tinkham and Swayze (2021)](https://scholar.google.com/scholar?cluster=11260597505702247290&hl=en&as_sdt=0,6). This recommended variable window function has the form:
 
@@ -2373,7 +2381,7 @@ lidR::locate_trees(
   chm
   , algorithm = lmf(
     ws = ws_fn
-    , hmin = 1.37
+    , hmin = 2
   )
 )
 ```
@@ -2458,7 +2466,7 @@ crowns = lidR::watershed(
   # input raster layer !! works with terra or stars !!
   chm = master_chm
   # threshold below which a pixel cannot be a tree. Default is 2
-  , th_tree = 1.37
+  , th_tree = 2
 )
 
 plot(crowns, col = (viridis::turbo(2000) %>% sample()))
@@ -2473,7 +2481,7 @@ Instead, the `ForestTools::mcws` marker-controlled watershed segmentation algori
 crowns = ForestTools::mcws(
   treetops = sf::st_zm(tree_tops, drop = T) # drops z values
   , CHM = raster::raster(master_chm) # converts to raster data
-  , minHeight = 1.37
+  , minHeight = minimum_tree_height
 ) %>% terra::rast()
 
 # str(crowns)
@@ -2657,7 +2665,7 @@ tree_tops %>%
 
 ## Spatial join the tree tops with the tree crowns
 
-The delineated crown raster (`terra` SpatRaster) is converted to vector data (i.e. polygons) and crowns with an area smaller than the user defined crown area are removed (`r min_crown_size_m2`m in this example). The tree tops are then spatially joined with the tree crowns.
+The delineated crown raster (`terra` SpatRaster) is converted to vector data (i.e. polygons) and crowns with an area smaller than 0.1 m^2^ are removed. The tree tops are then spatially joined with the tree crowns.
 
 ```{r crown-tree-join}
 ### Convert crown raster to terra rast, then polygons, then to Sf
@@ -2678,7 +2686,7 @@ crowns_sf = crowns %>%
   ) %>% 
   #remove super small crowns
   dplyr::filter(
-    crown_area_m2 > min_crown_size_m2
+    crown_area_m2 > 0.1
   )
   
   # str(crowns_sf)
@@ -3014,8 +3022,6 @@ Estimated versus observed DBH
 data.frame(
   dbh_training_data_temp
   , predicted = stem_prediction_model$predicted
-  , mse = stem_prediction_model$mse
-  , rsq = stem_prediction_model$rsq
 ) %>% 
 ggplot() +
   geom_abline() +
@@ -3114,7 +3120,7 @@ crowns_sf_with_dbh = crowns_sf %>%
   )
 ```
 
-Histogram of estimated DBH values
+### Histogram of estimated DBH values
 
 ```{r est-dbh-hist}
 ### plot
@@ -3133,7 +3139,7 @@ Histogram of estimated DBH values
     theme_light()
 ```
 
-Relationship between height and DBH
+### Relationship between height and DBH
 
 ```{r est-dbh-ht}
 ### plot
@@ -3143,7 +3149,7 @@ Relationship between height and DBH
   ) +
   geom_smooth(
     method = "loess"
-    , span = 2
+    , span = 1
     , color = "gray44"
   ) +
   geom_point(
@@ -3164,6 +3170,42 @@ Relationship between height and DBH
   )
 ```
 
+### Map Final Tree Heights and Diameters
+
+```{r map-fnl-trees}
+# get tree points
+map_temp = crowns_sf_with_dbh %>% 
+  sf::st_drop_geometry() %>% 
+  sf::st_as_sf(coords = c("tree_x", "tree_y"), crs = sf::st_crs(crowns_sf_with_dbh))
+
+# map
+mapview::mapview(
+    las_ctg@data$geometry
+    , color = "black"
+    , lwd = 3, alpha.regions = 0.0, legend = F, label = F
+    , layer.name = "las boundary"
+  ) +
+  mapview::mapview(
+    map_temp
+    , zcol = "tree_height_m"
+    , col.regions = viridis::viridis(20)
+    , cex = 3
+    , legend = T
+    , label = F
+    , layer.name = "height_m"
+  ) +
+  mapview::mapview(
+    map_temp
+    , zcol = "dbh_cm"
+    , col.regions = viridis::inferno(10)
+    , cex = 3
+    , legend = T
+    , label = F
+    , layer.name = "dbh_cm"
+    , hide = T
+  )
+```
+
 ```{r, warning=FALSE, message=FALSE, echo=FALSE, include=FALSE}
 remove(list = ls()[grep("_temp",ls())])
 gc()
@@ -3175,45 +3217,153 @@ Utilize the final data produced in the [prior section](#model_dbhs) which includ
 
 Common silvicultural metrics are calculated for the entire extent. Note, that stand-level summaries can be computed if stand vector data is provided.
 
-```{r silv-calc}
-# stand-level summaries
-crowns_sf_with_dbh %>% 
+```{r silv-calc, results='hide'}
+### stand-level summaries
+  silv_metrics_temp = crowns_sf_with_dbh %>%
+    sf::st_drop_geometry() %>% 
+    dplyr::ungroup() %>% 
+    dplyr::mutate(
+      plotID = "1" # can spatially join to plot vectors if available
+      , plot_area_m2 = las_ctg@data$geometry %>% 
+        sf::st_union() %>% 
+        sf::st_area() %>% # result is m2
+        as.numeric()
+      , plot_area_ha = plot_area_m2/10000 # convert to ha
+    ) %>% 
+    dplyr::group_by(plotID,plot_area_ha) %>% 
+    dplyr::summarise(
+      n_trees = dplyr::n_distinct(treeID)
+      , mean_dbh_cm = mean(dbh_cm, na.rm = T)
+      , mean_tree_height_m = mean(tree_height_m, na.rm = T)
+      , loreys_height_m = sum(basal_area_m2*tree_height_m, na.rm = T) / sum(basal_area_m2, na.rm = T)
+      , basal_area_m2 = sum(basal_area_m2, na.rm = T)
+      , sum_dbh_cm_sq = sum(dbh_cm^2, na.rm = T)
+    ) %>% 
+    dplyr::ungroup() %>% 
+    dplyr::mutate(
+      trees_per_ha = (n_trees/plot_area_ha)
+      , basal_area_m2_per_ha = (basal_area_m2/plot_area_ha)
+      , qmd_cm = sqrt(sum_dbh_cm_sq/n_trees)
+    ) %>% 
+    dplyr::select(-c(sum_dbh_cm_sq)) %>% 
+    # convert to imperial units
+    dplyr::mutate(
+      dplyr::across(
+        .cols = tidyselect::ends_with("_cm")
+        , ~ .x * 0.394
+        , .names = "{.col}_in"
+      )
+      , dplyr::across(
+        .cols = tidyselect::ends_with("_m")
+        , ~ .x * 3.28
+        , .names = "{.col}_ft"
+      )
+      , dplyr::across(
+        .cols = tidyselect::ends_with("_m2_per_ha")
+        , ~ .x * 4.359
+        , .names = "{.col}_ftac"
+      )
+      , dplyr::across(
+        .cols = tidyselect::ends_with("_per_ha") & !tidyselect::ends_with("_m2_per_ha")
+        , ~ .x * 0.405
+        , .names = "{.col}_ac"
+      )
+      , dplyr::across(
+        .cols = tidyselect::ends_with("_area_ha")
+        , ~ .x * 2.471
+        , .names = "{.col}_ac"
+      )
+      , dplyr::across(
+        .cols = tidyselect::ends_with("_m2")
+        , ~ .x * 10.764
+        , .names = "{.col}_ft2"
+      )
+    ) %>% 
+    dplyr::rename_with(
+      .fn = function(x){dplyr::case_when(
+        stringr::str_ends(x,"_cm_in") ~ stringr::str_replace(x,"_cm_in","_in")
+        , stringr::str_ends(x,"_m_ft") ~ stringr::str_replace(x,"_m_ft","_ft")
+        , stringr::str_ends(x,"_m2_per_ha_ftac") ~ stringr::str_replace(x,"_m2_per_ha_ftac","_ft2_per_ac")
+        , stringr::str_ends(x,"_per_ha_ac") ~ stringr::str_replace(x,"_per_ha_ac","_per_ac")
+        , stringr::str_ends(x,"_area_ha_ac") ~ stringr::str_replace(x,"_area_ha_ac","_area_ac")
+        , stringr::str_ends(x,"_m2_ft2") ~ stringr::str_replace(x,"_m2_ft2","_ft2")
+        , TRUE ~ x
+      )}
+    ) %>% 
+    dplyr::select(
+      "plotID"
+      , "n_trees"
+      , "plot_area_ha"
+      , "trees_per_ha"
+      , "mean_dbh_cm"
+      , "qmd_cm"
+      , "mean_tree_height_m"
+      , "loreys_height_m"
+      , "basal_area_m2"
+      , "basal_area_m2_per_ha"
+      # imperial
+      , "plot_area_ac"
+      , "trees_per_ac"
+      , "mean_dbh_in"
+      , "qmd_in"
+      , "mean_tree_height_ft"
+      , "loreys_height_ft"
+      , "basal_area_ft2"
+      , "basal_area_ft2_per_ac"
+    )
+
+### export tabular
+  write.csv(
+      silv_metrics_temp
+      , paste0(config$delivery_spatial_dir, "/final_plot_silv_metrics.csv")
+      , row.names = F
+    )
+
+### Join back to spatial data
+  # this would just be a vector file if available
+  silv_metrics_temp = las_ctg@data %>%
+    dplyr::select(
+      1, geometry  
+    ) %>% 
+    dplyr::mutate(
+      plotID = "1" # can spatially join to plot vectors if available
+    ) %>% 
+    dplyr::group_by(plotID) %>% 
+    dplyr::summarise(
+      geometry = sf::st_union(geometry)
+    ) %>% 
+    dplyr::ungroup() %>% 
+    # join with plot data data
+    dplyr::inner_join(
+      silv_metrics_temp
+      , by = dplyr::join_by("plotID")
+    )
+  # str(silv_metrics_temp)
+
+### export spatial
+  sf::st_write(
+      silv_metrics_temp
+      , paste0(config$delivery_spatial_dir, "/final_plot_silv_metrics.gpkg")
+      , append = FALSE
+      , quiet = TRUE
+    )
+```
+
+Table of silvicultural measurements in both metric and imperial units
+
+```{r silv-calc-tab1}
+### summary table
+silv_metrics_temp %>% 
   sf::st_drop_geometry() %>% 
-  dplyr::ungroup() %>% 
-  dplyr::mutate(
-    plotID = "1" # can spatially join to plot vectors if available
-    , plot_area_m2 = las_ctg@data$geometry %>% 
-      sf::st_union() %>% 
-      sf::st_area() %>% 
-      as.numeric()
-  ) %>% 
-  dplyr::group_by(plotID,plot_area_m2) %>% 
-  dplyr::mutate(
-    height_rank = dplyr::row_number(desc(tree_height_m))
-  ) %>% 
-  dplyr::summarise(
-    mean_dbh_cm = mean(dbh_cm, na.rm = T)
-    , mean_tree_height_m = mean(tree_height_m, na.rm = T)
-    , dominant_height_m = mean(ifelse(height_rank<=2,tree_height_m,NA), na.rm = T)
-    , n_trees = dplyr::n_distinct(treeID)
-    , basal_area_m2 = sum(basal_area_m2)
-    # , basal_area_ft2 = sum(basal_area_ft2)
-    , sum_dbh_cm_sq = sum(dbh_cm^2, na.rm = T)
-  ) %>% 
-  dplyr::mutate(
-    trees_per_ha = (n_trees/plot_area_m2)*10000
-    , basal_area_m2_per_ha = (basal_area_m2/plot_area_m2)*10000
-    , qmd_cm = sqrt(sum_dbh_cm_sq/n_trees)
-  ) %>% 
-  dplyr::select(-c(sum_dbh_cm_sq)) %>% 
-  dplyr::relocate(qmd_cm, .after = mean_dbh_cm) %>% 
+  dplyr::filter(plotID==silv_metrics_temp$plotID[1]) %>% 
   tidyr::pivot_longer(
     cols = -c(plotID)
-    , names_to = "metric"
+    , names_to = "measure"
     , values_to = "value"
   ) %>% 
   kableExtra::kbl(
-    digits = 2
+    caption = "Silvicultural metrics in both metric and imperial units"
+    , digits = 2
   ) %>% 
   kableExtra::kable_styling()
 ```
@@ -3298,7 +3448,7 @@ Instead, this section uses the stems detected using the `TreeLS` [workflow in th
       dplyr::select(treeID, Z) %>% 
       sf::st_zm(drop = T) # drops z values
     , CHM = raster::raster(master_chm) # converts to raster data
-    , minHeight = 1.37
+    , minHeight = minimum_tree_height
   ) %>% terra::rast()
 
 
@@ -3337,7 +3487,7 @@ ggplot() +
 
 ### Spatial join the `TreeLS` stems with the `TreeLS` tree crowns
 
-The delineated crown raster (`terra` SpatRaster) is converted to vector data (i.e. polygons) and crowns with an area smaller than the user defined crown area are removed (`r min_crown_size_m2`m in this example). The tree tops are then spatially joined with the tree crowns.
+The delineated crown raster (`terra` SpatRaster) is converted to vector data (i.e. polygons) and crowns with an area smaller than 0.1 m^2^ are removed. The tree tops are then spatially joined with the tree crowns.
 
 ```{r crowns-treels-join}
 ### Convert crown raster to terra rast, then polygons, then to Sf
@@ -3358,7 +3508,7 @@ crowns_treels_sf_temp = crowns_treels_temp %>%
   ) %>% 
   #remove super small crowns
   dplyr::filter(
-    crown_area_m2 > min_crown_size_m2
+    crown_area_m2 > 0.1
   )
   
   # str(crowns_treels_sf_temp)
@@ -3584,146 +3734,4 @@ plot3D::scatter3D(
 ```{r, warning=FALSE, message=FALSE, echo=FALSE, include=FALSE}
 remove(list = ls()[grep("_temp",ls())])
 gc()
-```
-
----
-
-```{r, eval=F, include=F}
-
-###__________________________###
-### FUNCTIONS IN DEVELOPMENT ###
-###__________________________###
-###_______________________________###
-### Configure project directories ###
-###_______________________________###
-
-### Set up the project directory structure
-total_start = Sys.time()
-config = create_project_structure(rootdir)
-
-### Read in the las files, check the number of points and CRS
-las_ctg = read_las_as_ctg(config)
-las_ctg
-mapview(las_ctg@data$geometry)
-
-###__________________________________________________________###
-### Set parameters for tiling, buffering, and tree detection ###
-###__________________________________________________________###
-
-### Set the extent of the tile grid
-desired_tile_res = 50
-
-### Set the desired buffer size
-desired_buffer_size = 10
-
-### Set the window size for top down tree detection
-window_size = 3.5
-
-### Set the minimum height for crown delineation
-minimum_height = 1
-
-### Set the minimum crown size (m^2) to be retained after delineation
-min_crown_size_m2 = 3
-
-### Set the maximum dbh size (meters)
-dbh_max_size_m = 1.5
-
-###_______________________________________________________###
-### Run the function to generate a tile grid for cropping ###
-###_______________________________________________________###
-
-### Generate the grid overlay on top of the las catalog geometry
-las_grid = generate_grid_over_extent(las_ctg, desired_tile_res)
-las_grid_buff = sf::st_buffer(las_grid, desired_buffer_size)
-mapview(las_grid_buff) + las_ctg@data$geometry
-
-###_______________________________###
-### Tile the original point cloud ###
-###_______________________________###
-
-create_lax_for_tiles(config$input_las_dir)
-tiled_grid = new_tile_las_to_grid_foreach(config, desired_buffer_size)
-mapview(tiled_grid)
-create_lax_for_tiles(config$las_tile_dir)
-
-###______________________________________________________###
-### Next, classify ground and height normalize each tile ###
-###______________________________________________________###
-
-height_norm_grid = classify_ground_normalize(config, las_grid, want_to_classify_ground = TRUE)
-mapview(height_norm_grid)
-create_lax_for_tiles(config$las_ground_tile_dir)
-create_lax_for_tiles(config$las_norm_tile_dir)
-
-###___________________________________________###
-### Rasterize the tiled las to get a DEM file ###
-###___________________________________________###
-
-rasterize_tiles_to_dem(config, des_dem_res = 3, calculate_extent = FALSE)
-
-###_____________________________________________###
-### Rasterize the normalized tiles to CHM tiles ###
-###_____________________________________________###
-
-rasterize_tiles_to_chm(config, des_chm_res = 0.25, max_height_threshold = 60, calculate_extent = FALSE)
-
-###_____________________________________________________###
-### Rasterize the stem section at DBH to stem CHM tiles ###
-###_____________________________________________________###
-
-rasterize_tiles_to_stem_chm(config, des_stem_chm_res = 0.07, min_z = 1.2, max_z = 1.4, calculate_extent = FALSE)
-
-###_______________________________________________________________###
-### Detect trees via stem search algorithm, then delineate crowns ###
-###_______________________________________________________________###
-
-detect_stems_within_tiles(config, dbh_max_size_m)
-create_lax_for_tiles(config$las_stem_dir)
-
-###_______________________________________###
-### Detect crowns using top down approach ###
-###_______________________________________###
-
-detect_crowns_top_down(config, desired_chm_res = 0.25, window_size, minimum_height, min_crown_size_m2)
-
-###________________________________________###
-### Detect crowns using bottom up approach ###
-###________________________________________###
-
-detect_crowns_bottom_up(config, desired_chm_res = 0.25, window_size, minimum_height, min_crown_size_m2)
-
-###_____________________________________________________________________###
-### Run the hybrid crown delineation method with missing dbh prediction ###
-###_____________________________________________________________________###
-
-wrapper_hybrid_crown_delineation_missing_dbh_prediction(config)
-
-###______________________________________###
-### Run the final tree detection methods ###
-###______________________________________###
-
-detect_final_crowns(config, desired_chm_res = 0.25, window_size, minimum_height, min_crown_size_m2)
-
-###___________________________________________###
-### Run the crop and colorize by tree ID step ###
-###___________________________________________###
-
-crop_crowns_by_id_and_colorize_stems_and_veg(config, las_grid, colorize_input_las, stem_color_hex_temp, veg_color_hex_temp, ground_color_hex_temp,
-                                             use_bottom_up_crowns = FALSE)
-
-###_____________________________________###
-### Get final tree detection statistics ###
-###_____________________________________###
-
-final_stats = get_final_tree_stats(config)
-final_stats
-
-###_______________________________###
-### Get the total processing time ###
-###_______________________________###
-
-total_end = Sys.time()
-total_master = difftime(total_end, total_start, units = c("mins"))
-print(paste0("Total tree pipeline took ", total_master, " minutes ... "))
-
 ```
