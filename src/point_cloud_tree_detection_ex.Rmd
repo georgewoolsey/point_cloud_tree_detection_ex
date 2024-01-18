@@ -33,10 +33,10 @@ This script processes point cloud data in `las` or `laz` file format from Lidar 
 * Individual tree DBH estimates
     + [SfM derived DBH using a 2D circle fitting algorithm](#detect-stems)
     + [Local model to estimate missing DBH's](#model_dbhs)
-* Stand- and study-level standard silvicultural metrics: 
+* [Stand- and study-level standard silvicultural metrics](#silv_calc) including: 
     + trees ha^−1^ 
     + basal area (m^2^ ha^−1^)
-    + DBH distributions
+    + quadratic mean diameter (QMD)
 
 This script incorporates and builds upon the techniques outlined in research including:
 
@@ -101,7 +101,8 @@ library(rlas)
 
 # FIA data
 ## devtools::install_github('hunter-stanke/rFIA')
-## library(rFIA) ## removed from CRAN
+# library(rFIA) ## removed from CRAN
+# library(FIESTA) ## available from CRAN
 
 # modeling
 library(randomForest)
@@ -124,6 +125,8 @@ library(rgl) # more 3d visualization
 library(dbscan)
 library(deldir)
 library(tools)
+# library(forestmangr) # easy forestry metrics
+
 ```
 
 # User-Defined Parameters
@@ -171,7 +174,7 @@ window_size = 3.5
 minimum_tree_height = 1.37
 
 ### Set the minimum crown size (m^2) to be retained after delineation
-min_crown_size_m2 = 3
+min_crown_size_m2 = 0.1
 
 ### Set the maximum dbh size (meters)
 dbh_max_size_m = 1.5
@@ -1884,8 +1887,9 @@ plot3D::scatter3D(
   , y = treemap_temp@data$Y
   , z = treemap_temp@data$Z
   , colvar = treemap_temp@data$TreeID
-  , col = viridis::viridis(treemap_temp@data$TreeID %>% unique() %>% length())
+  , col = viridis::turbo(treemap_temp@data$TreeID %>% unique() %>% length())
   , pch = 19, cex = 0.5
+  , colkey = F
 )
 ```
 
@@ -1916,8 +1920,9 @@ plot3D::scatter3D(
   , y = las_norm_tile_temp@data$Y
   , z = las_norm_tile_temp@data$Z
   , colvar = las_norm_tile_temp@data$TreeID
-  , col = viridis::viridis(las_norm_tile_temp@data$TreeID %>% unique() %>% length())
+  , col = viridis::turbo(las_norm_tile_temp@data$TreeID %>% unique() %>% length())
   , pch = 19, cex = 0.2
+  , colkey = F
 )
 ```
 
@@ -1962,6 +1967,7 @@ plot3D::scatter3D(
   , colvar = plt_las_norm_tile_temp@data$Stem
   , col = viridis::viridis(plt_las_norm_tile_temp@data$Stem %>% unique() %>% length())
   , pch = 19, cex = 0.4
+  , colkey = F
 )
 ```
 
@@ -2126,6 +2132,7 @@ plot3D::scatter3D(
 ```{r, warning=FALSE, message=FALSE, echo=FALSE, include=FALSE}
 # remove the data frame
 remove(merged_stem_points)
+remove(stem_points_las)
 remove(list = ls()[grep("_temp",ls())])
 gc()
 ```
@@ -3094,6 +3101,9 @@ crowns_sf_with_dbh = crowns_sf %>%
     , radius_m = dbh_m/2
     , basal_area_m2 = pi * (radius_m)^2
     , basal_area_ft2 = basal_area_m2 * 10.764
+  ) %>% 
+  dplyr::select(
+    !tidyselect::ends_with("_dbh_cm")
   )
 # write the data to the disk
   sf::st_write(
@@ -3159,249 +3169,54 @@ remove(list = ls()[grep("_temp",ls())])
 gc()
 ```
 
-# Colorize the Point Cloud
+# Calculate Silviculture Metrics{#silv_calc}
 
-This workflow uses point cloud data generated in [this section](#process_stems) which was exported as a `laz` file to the `r config$las_stem_dir` directory with the `Classification` data updated to: ground points (class 2); water points (class 9); stem points (class 4); non-stem (class 5). The color (RGB values) of the classified points are compared to expected colors for each class to filter for "pure" stem and canopy points.
+Utilize the final data produced in the [prior section](#model_dbhs) which includes unique trees and tree locations with tree height based on [identification from the CHM](#chm_tree_detect), tree [crown information](#crown_delin), and estimated [DBH values](#model_dbhs) for the entire study area extent based on the original `laz` input folder (`r config$input_las_dir`).
 
-This process was utilized to filter the point cloud for stem-only points based on spectral (i.e. RGB) information to estimate DBH. In the [DBH estimation workflow above](#process_stems), this filtering process was not applied. To implement this filter, the point cloud passed to the `TreeLS::tlsInventory` function would need to be filtered using points matching the desired color.
+Common silvicultural metrics are calculated for the entire extent. Note, that stand-level summaries can be computed if stand vector data is provided.
 
-This process is explained in [Swayze et al. (2022)](https://scholar.google.com/scholar?cluster=12684146395735544399&hl=en&as_sdt=0,6): 
-
-*a green:red ratio index (NGRR; Eq. (1)) was calculated on each point to determine the distribution (Fig. 4A) of stem and canopy NGRR values. Based on the distributions, each of the 30 point clouds were segmented to only include points with NGRR values below the 90th percentile of the sample stem points (− 0.0152), producing 30 point clouds only containing points with stem reflectance characteristics. For each of these stem point clouds, a 10 cm tall slice (1.32–1.42 m) was extracted and compressed to a height of 1.37 m to represent the DBH region on the trees...These DBH slices were later used to extract individual tree DBH values.*
-
-Equation 1:
-
-$$
-NGGR_i = \frac{Green_i - Red_i}{Green_i + Red_i}
-$$
-
-, where $NGRR$ is the green:red ratio index for the $i_{th}$ point in the point cloud.
-
-```{r, include=FALSE, eval=FALSE}
-### New function to colorize las files based on input type
-colorize_input_las = function(input_las, desired_color){
-  
-  color_ramp_rgb = paste(as.vector(col2rgb(desired_color)), collapse = " ")
-  color_ramp_rgb = stringr::str_split(color_ramp_rgb, pattern = " ")  
-  color_ramp_rgb = as.data.frame(color_ramp_rgb)  
-  color_ramp_rgb = t(color_ramp_rgb)
-  rownames(color_ramp_rgb) = NULL
-  color_ramp_rgb = as.data.frame(color_ramp_rgb)
-  colnames(color_ramp_rgb) = c("R", "G", "B")
-  R = rep(as.integer(color_ramp_rgb$R), nrow(input_las@data))    
-  G = rep(as.integer(color_ramp_rgb$G), nrow(input_las@data))  
-  B = rep(as.integer(color_ramp_rgb$B), nrow(input_las@data)) 
-  
-  ### Use the lidR functions to colorize the point cloud
-  input_las = lidR::add_lasrgb(input_las, R = R, G = G, B = B)   
-  return(input_las)
-  
-}
-
-master_crowns = sf::st_read("final_detected_crowns.gpkg", quiet = TRUE)
-
-las_stem_ctg = lidR::readTLSLAScatalog(config$las_stem_dir)
-
-### Get the desired crown file
-des_crown = master_crowns[i,]
-
-### Crop the crown file from the las catalog
-cropped_crown = lidR::clip_roi(las_stem_ctg, des_crown)
-      
-
-### Pull the veg and stems from the cropped crown
-veg = lidR::filter_poi(cropped_crown, Classification == 5)
-
-### Get random color for the veg
-des_veg_color = randomcoloR::randomColor(count = 1, hue = c("green"), luminosity = c("dark"))
-
-### Colorize the veg points
-veg = colorize_input_las(veg, desired_color = des_veg_color)
-
-
-### New function to crop each crown to each canopy polygon, colorize, write to disk
-crop_crowns_by_id_and_colorize_stems_and_veg = function(config, las_grid, colorize_input_las, stem_color_hex, veg_color_hex, ground_color_hex, use_bottom_up_crowns){
-  
-  stem_color_hex = "#8B4513"
-  veg_color_hex = "#228B22"
-  ground_color_hex = "#EEE8AA"
-  
-  ###___________________________###
-  ### Read in the desired files ###
-  ###___________________________###
-  
-  ### Read in the master crown file
-  print(paste0("Initializing tree crown crop and colorization algorithm ... "))
-  
-  ### If use bottom up crowns == FALSE, use combined crowns
-  if(use_bottom_up_crowns == FALSE){  
-    
-    setwd(config$delivery_spatial_dir)
-    master_crowns = sf::st_read("final_detected_crowns.gpkg", quiet = TRUE)
-    master_crowns
-    
-  }
-  
-  ### If use bottom up crowns == TRUE, use bottom up crowns
-  if(use_bottom_up_crowns == TRUE){  
-    
-    setwd(config$working_spatial_dir)
-    master_crowns = sf::st_read("bottom_up_crowns.gpkg", quiet = TRUE)
-    master_crowns
-    
-  }
-  
-  
-  
-  ### Read in the classified las files as a catalog
-  las_stem_ctg = lidR::readTLSLAScatalog(config$las_stem_dir)
-  las_stem_ctg
-  
-  ###_____________________________###
-  ### Initialize parallel session ###
-  ###_____________________________###
-  
-  print(paste0("Processing ", nrow(master_crowns), " crown files ... "))
-  start_time = Sys.time()
-  cores = detectCores()
-  print(paste0("Starting parallel cluster on ", cores-1, " cores ... "))
-  cluster = makeCluster(cores-1)
-  registerDoParallel(cluster)
-  foreach(i=1:nrow(master_crowns), .packages = c("lidR"), .errorhandling = "remove", .inorder = FALSE) %dopar% {
-    
-    ### Get the desired crown file
-    des_crown = master_crowns[i,]
-    des_crown
-    
-    ### Has the crown already been cropped/colored?
-    file_to_check = paste0(config$las_tree_dir, "/", i, ".laz")
-    does_file_exsist = file.exists(file_to_check)
-    does_file_exsist
-    
-    ### If file exsists, skip
-    if(does_file_exsist == TRUE){return(NULL)}
-    
-    ### If file doesnt exsist, crop the file
-    if(does_file_exsist == FALSE){
-      
-      ### Crop the crown file from the las catalog
-      cropped_crown = lidR::clip_roi(las_stem_ctg, des_crown)
-      
-      ### Drop points low to the ground
-      cropped_crown = lidR::filter_poi(cropped_crown, Z > 0.1)
-      
-      ### Pull the veg and stems from the cropped crown
-      veg = lidR::filter_poi(cropped_crown, Classification == 5)
-      stem = lidR::filter_poi(cropped_crown, Classification == 4)
-      
-      ### Get some checks
-      veg_empty = lidR::is.empty(veg)
-      stem_empty = lidR::is.empty(stem)
-      
-      ###______________________________________________________________________###
-      ### If stems and crowns are not empty, color them then write to the disk ###
-      ###______________________________________________________________________###
-      
-      if(veg_empty == FALSE && stem_empty == FALSE){
-        
-        ### Get random color for the veg
-        des_veg_color = randomcoloR::randomColor(count = 1, hue = c("green"), luminosity = c("dark"))
-        
-        ### Colorize the veg points
-        veg = colorize_input_las(veg, desired_color = des_veg_color)
-        
-        ### Get random colors for the stems
-        des_stem_color = randomcoloR::randomColor(count = 1, hue = c("orange"), luminosity = c("dark"))
-        
-        ### Colorize the stem points
-        stem = colorize_input_las(stem, desired_color = des_stem_color)
-        
-        ### Combine the colored stems and veg
-        combined = rbind(veg, stem)
-        
-        ### Write the colored crown to the disk
-        setwd(config$las_tree_dir)
-        out_name = paste0(des_crown$treeID,".laz")
-        lidR::writeLAS(combined, out_name)
-        return(NULL)
-        
-      }
-      
-      ###___________________________________________________________________________________###
-      ### If the veg isnt empty, and the stems are empty, color the veg, then write to disk ###
-      ###___________________________________________________________________________________###
-      
-      if(veg_empty == FALSE && stem_empty == TRUE){
-        
-        ### Get random color for the veg
-        des_veg_color = randomcoloR::randomColor(count = 1, hue = c("green"), luminosity = c("dark"))
-        
-        ### Colorize the veg points
-        veg = colorize_input_las(veg, desired_color = des_veg_color)
-        
-        ### Write the colored crown to the disk
-        setwd(config$las_tree_dir)
-        out_name = paste0(des_crown$treeID,".laz")
-        lidR::writeLAS(veg, out_name)
-        return(NULL)
-        
-      }
-      
-    }
-    
-  }
-  stopCluster(cluster)
-  end_time = Sys.time()
-  total_crop_time = difftime(end_time, start_time, units = c("mins"))
-  print(paste0("Total crop/colorization took ", total_crop_time, " minutes ... "))
-  
-  ###___________________________________________###
-  ### Loop through the cropped crowns and merge ###
-  ###___________________________________________###
-  
-  las_list = list.files(config$las_tree_dir, pattern = ".las")
-  laz_list = list.files(config$las_tree_dir, pattern = ".laz")
-  lidar_list = append(las_list, laz_list)
-  lidar_list
-  
-  print(paste0("Merging ", length(lidar_list), " tree las files ... "))
-  start_time = Sys.time()
-  cores = detectCores()
-  print(paste0("Starting parallel cluster on ", cores-1, " cores ... "))
-  cluster = makeCluster(cores-1)
-  registerDoParallel(cluster)
-  merged_data_las = foreach(i=1:length(lidar_list)) %dopar% {
-    
-    setwd(config$las_tree_dir)
-    des_file = lidar_list[i]
-    las = lidR::readTLSLAS(des_file)
-    data = las@data
-    return(data)
-    
-  }
-  stopCluster(cluster)
-  
-  merged_data = data.table::rbindlist(merged_data_las)
-  las = lidR::LAS(merged_data)
-  st_crs(las) = st_crs(las_stem_ctg)
-  las
-  
-  ### Write the las file to the disk
-  setwd(config$delivery_las_dir)
-  lidR::writeLAS(las, "master_classified_trees.las")
-  
-}
-
-
-###___________________________________________###
-### Run the crop and colorize by tree ID step ###
-###___________________________________________###
-
-crop_crowns_by_id_and_colorize_stems_and_veg(config, las_grid, colorize_input_las, stem_color_hex, veg_color_hex, ground_color_hex,
-                                             use_bottom_up_crowns = FALSE)
-
+```{r silv-calc}
+# stand-level summaries
+crowns_sf_with_dbh %>% 
+  sf::st_drop_geometry() %>% 
+  dplyr::ungroup() %>% 
+  dplyr::mutate(
+    plotID = "1" # can spatially join to plot vectors if available
+    , plot_area_m2 = las_ctg@data$geometry %>% 
+      sf::st_union() %>% 
+      sf::st_area() %>% 
+      as.numeric()
+  ) %>% 
+  dplyr::group_by(plotID,plot_area_m2) %>% 
+  dplyr::mutate(
+    height_rank = dplyr::row_number(desc(tree_height_m))
+  ) %>% 
+  dplyr::summarise(
+    mean_dbh_cm = mean(dbh_cm, na.rm = T)
+    , mean_tree_height_m = mean(tree_height_m, na.rm = T)
+    , dominant_height_m = mean(ifelse(height_rank<=2,tree_height_m,NA), na.rm = T)
+    , n_trees = dplyr::n_distinct(treeID)
+    , basal_area_m2 = sum(basal_area_m2)
+    # , basal_area_ft2 = sum(basal_area_ft2)
+    , sum_dbh_cm_sq = sum(dbh_cm^2, na.rm = T)
+  ) %>% 
+  dplyr::mutate(
+    trees_per_ha = (n_trees/plot_area_m2)*10000
+    , basal_area_m2_per_ha = (basal_area_m2/plot_area_m2)*10000
+    , qmd_cm = sqrt(sum_dbh_cm_sq/n_trees)
+  ) %>% 
+  dplyr::select(-c(sum_dbh_cm_sq)) %>% 
+  dplyr::relocate(qmd_cm, .after = mean_dbh_cm) %>% 
+  tidyr::pivot_longer(
+    cols = -c(plotID)
+    , names_to = "metric"
+    , values_to = "value"
+  ) %>% 
+  kableExtra::kbl(
+    digits = 2
+  ) %>% 
+  kableExtra::kable_styling()
 ```
-
 
 # Micellaneous Unused Processes
 
@@ -3618,6 +3433,158 @@ remove(list = ls()[grep("_temp",ls())])
 gc()
 ```
 
+# Colorize the Point Cloud (example)
+
+<span style="color: red;"><b>This section includes an example workflow only and is not completed for the full data extent.</b></span>
+
+Additional information on colorizing point cloud can be found in [The `lidR` Package Book](https://r-lidar.github.io/lidRbook/outbox.html#outbox-multispectral-coloring).
+
+This workflow uses point cloud data generated in [this section](#process_stems) which was exported as a `laz` file to the `r config$las_stem_dir` directory with the `Classification` data updated to: ground points (class 2); water points (class 9); stem points (class 4); non-stem (class 5). The color (RGB values) of the classified points are compared to expected colors for each class to filter for "pure" stem and canopy points.
+
+In the literature, this process has been utilized to filter the point cloud for stem-only points based on spectral (i.e. RGB) information to estimate DBH. In the [DBH estimation workflow above](#process_stems), this filtering process was not applied. To implement this filter, the point cloud passed to the `TreeLS::tlsInventory` function would need to be filtered using points matching the desired color.
+
+This process is explained in [Swayze et al. (2022)](https://scholar.google.com/scholar?cluster=12684146395735544399&hl=en&as_sdt=0,6): 
+
+*a green:red ratio index (NGRR; Eq. (1)) was calculated on each point to determine the distribution (Fig. 4A) of stem and canopy NGRR values. Based on the distributions, each of the 30 point clouds were segmented to only include points with NGRR values below the 90th percentile of the sample stem points (− 0.0152), producing 30 point clouds only containing points with stem reflectance characteristics. For each of these stem point clouds, a 10 cm tall slice (1.32–1.42 m) was extracted and compressed to a height of 1.37 m to represent the DBH region on the trees...These DBH slices were later used to extract individual tree DBH values.*
+
+Equation 1:
+
+$$
+NGGR_i = \frac{Green_i - Red_i}{Green_i + Red_i}
+$$
+
+, where $NGRR$ is the green:red ratio index for the $i_{th}$ point in the point cloud.
+
+## Function to add RGB to points
+
+This function adds the user-defined color to the RGB values of the user-defined point cloud
+
+```{r colorize-rgbpts}
+### this function adds a random color to the RGB values of the point cloud
+colorize_input_las = function(input_las, desired_color){
+  # extract RGB values from hex color code
+  color_ramp_rgb = paste(as.vector(col2rgb(desired_color)), collapse = " ")
+  color_ramp_rgb = stringr::str_split(color_ramp_rgb, pattern = " ")
+  # rows represent RGB
+  color_ramp_rgb = as.data.frame(color_ramp_rgb)
+  # transpose so columns represent RGB
+  color_ramp_rgb = t(color_ramp_rgb)
+  rownames(color_ramp_rgb) = NULL
+  color_ramp_rgb = as.data.frame(color_ramp_rgb)
+  colnames(color_ramp_rgb) = c("R", "G", "B")
+  # create vectors of RGB values to add to las data
+  R = rep(as.integer(color_ramp_rgb$R), nrow(input_las@data))  
+  G = rep(as.integer(color_ramp_rgb$G), nrow(input_las@data))
+  B = rep(as.integer(color_ramp_rgb$B), nrow(input_las@data))
+  
+  ### Use the lidR functions to colorize the point cloud
+    # Adds 3 columns named RGB and updates the point format 
+    # of the LAS object for a format that supports RGB attributes. 
+    # If the RGB values are ranging from 0 to 255 they are automatically scaled on 16 bits
+  input_las = lidR::add_lasrgb(input_las, R = R, G = G, B = B)
+  return(input_las)
+  
+}
+```
+
+## 1. Crop the pt. cloud to a crown polygon
+
+Filter the `laz` grid tile files created in [this section](#process_stems) and exported to the `r config$las_stem_dir` using an individual crown polygon. Points that are below 0.1 m in height are dropped. This example uses a tree with SfM-derived DBH that was used as part of the training data for the local [DBH estimation model](#model_dbhs).
+
+```{r colorize-filter, fig.keep='none', fig.show='hide'}
+### New function to crop each crown to each canopy polygon, colorize, write to disk
+# crop_crowns_by_id_and_colorize_stems_and_veg = function(config, las_grid, colorize_input_las, stem_color_hex_temp, veg_color_hex_temp, ground_color_hex_temp, use_bottom_up_crowns){
+  
+  ###___________________________###
+  ### Read in the las files ###
+  ###___________________________###
+  
+  ### Read in the classified las files as a catalog
+  las_stem_ctg_temp = lidR::readTLSLAScatalog(config$las_stem_dir)
+  
+  ###___________________________###
+  ### # for each individual tree crown {
+  ###___________________________###
+
+  ### Get the desired crown file 
+    des_crown_temp = crowns_sf_with_dbh %>%
+      dplyr::filter(is_training_data) %>% 
+      dplyr::slice_sample(n=1)
+    
+  ### Crop the crown file from the las catalog
+    cropped_crown_temp = lidR::clip_roi(las_stem_ctg_temp, des_crown_temp)
+    # drop points close to the ground
+    cropped_crown_temp = lidR::filter_poi(cropped_crown_temp, Z > 0.1)
+    # plot(cropped_crown_temp)
+```
+
+Plot the extracted point cloud for the example crown
+
+```{r colorize-filter-plt}
+plot3D::scatter3D(
+      x = cropped_crown_temp@data$X
+      , y = cropped_crown_temp@data$Y
+      , z = cropped_crown_temp@data$Z
+      , colvar = cropped_crown_temp@data$Z
+      , pch = 19, cex = 0.2
+      , colkey = F
+      , phi = 0.5
+    )
+```
+
+2. Assign RGB values to point cloud
+
+Call the `colorize_input_las` function defined above to assign a color to the points classified as stem and other, non-ground/non-stem based on the `Classification` value: ground points (class 2); water points (class 9); stem points (class 4); non-stem (class 5).
+
+```{r colorize-stems}
+    ### Pull the veg and stems from the cropped crown
+    veg_temp = lidR::filter_poi(cropped_crown_temp, Classification == 5)
+    stem_temp = lidR::filter_poi(cropped_crown_temp, Classification == 4)
+    
+    ###______________________________________________________________________###
+    ### If stems and crowns are not empty, color them then write to the disk ###
+    ###______________________________________________________________________###
+    # if(lidR::is.empty(veg_temp) == FALSE && lidR::is.empty(stem_temp) == FALSE){
+      
+      ### Get random color for the veg
+      des_veg_color_temp = "forestgreen"
+        # randomcoloR::randomColor(count = 1, hue = c("green"), luminosity = c("dark"))
+      
+      ### Colorize the veg points
+      veg_temp = colorize_input_las(veg_temp, desired_color = des_veg_color_temp)
+      
+      ### Get random colors for the stems
+      des_stem_color_temp = "tan4"
+        # randomcoloR::randomColor(count = 1, hue = c("orange"), luminosity = c("dark"))
+      
+      ### Colorize the stem points
+      stem_temp = colorize_input_las(stem_temp, desired_color = des_stem_color_temp)
+      
+      ### Combine the colored stems and veg
+      combined_veg_stem_temp = rbind(veg_temp, stem_temp)
+```
+
+Plot the colorized stems versus non-stem, non-ground points (assumed to be other vegetation)
+
+```{r colorize-stems-plt}
+plot3D::scatter3D(
+      x = cropped_crown_temp@data$X
+      , y = cropped_crown_temp@data$Y
+      , z = cropped_crown_temp@data$Z
+      , colvar = cropped_crown_temp@data$Classification
+      , col = c(des_stem_color_temp,des_veg_color_temp)
+      , pch = 19, cex = 0.2
+      , colkey = F
+      , phi = 0.5
+    )
+# can also plot using lidR plot with color = "RGB"
+    # plot(combined_veg_stem_temp, color = "RGB")
+```
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE, include=FALSE}
+remove(list = ls()[grep("_temp",ls())])
+gc()
+```
 
 ---
 
@@ -3626,119 +3593,6 @@ gc()
 ###__________________________###
 ### FUNCTIONS IN DEVELOPMENT ###
 ###__________________________###
-
-### Function to calculate basal area from final stem dataset
-get_final_tree_stats = function(config){
-  
-  message(" --- Starting final tree stats pipeline --- ")
-  master_start = Sys.time()
-  setwd(config$delivery_spatial_dir)
-  
-  ### Read in the final stem dataset
-  message("Reading in the final stem locations ... ")
-  final_stems = sf::st_read("final_stem_locations.gpkg", quiet = TRUE)
-  final_stems
-  
-  ### Read in the final canopy dataset
-  message("Reading in the final crown dataset ... ")
-  final_crowns = sf::st_read("final_detected_crowns.gpkg", quiet = TRUE)
-  final_crowns
-  
-  ### Read in the summary stats from height normalization
-  setwd(config$delivery_stats_dir)
-  normalization_stats = read.csv("02_point_cloud_classification_normalization_stats.csv")
-  head(normalization_stats)
-  
-  ###______________________________________________###
-  ### Get the basal area for the processed dataset ###
-  ###______________________________________________###
-  
-  ### Convert the stem measurement diameter to inches
-  message("Getting basal area statistics ... ")
-  dbh_inches = final_stems$dbh_cm/2.54
-  
-  ### Get basal area for each tree
-  basal_area_square_ft = (dbh_inches^2) * 0.005454
-  
-  ### Get the sum of basal area
-  sum_basal_area_square_ft = sum(basal_area_square_ft)
-  sum_basal_area_square_ft
-  
-  ### Get the sum of basal area in acres
-  sum_basal_area_acres = sum_basal_area_square_ft/43560
-  sum_basal_area_acres
-  
-  ###___________________________________###
-  ### Get the total tree count and area ###
-  ###___________________________________###
-  
-  message("Getting tree statistics ... ")
-  total_tree_count = nrow(final_crowns)
-  total_tree_count
-  
-  ### Get the sum crown area
-  sum_crown_area_m2 = sum(final_crowns$crown_area_m2)
-  sum_crown_area_m2  
-  
-  ### Convert to square feet
-  sum_crown_area_ft2 = sum_crown_area_m2*10.764
-  sum_crown_area_ft2
-  
-  ### Convert to acres
-  sum_crown_area_acres = sum_crown_area_m2/4047
-  sum_crown_area_acres
-  
-  ### Get the max tree height
-  max_tree_height = max(final_crowns$tree_height_m, na.rm = TRUE)
-  max_tree_height
-  
-  ### Get the median tree height
-  median_tree_height = median(final_crowns$tree_height_m, na.rm = TRUE)
-  median_tree_height
-  
-  ### Get the mean tree height
-  mean_tree_height = mean(final_crowns$tree_height_m, na.rm = TRUE)
-  mean_tree_height
-  
-  ###________________________###
-  ### Calculate tree density ###
-  ###________________________###
-  
-  message("Calculating tree density per acre ... ")
-  las_area_acres = normalization_stats$las_area_acres
-  trees_per_acre = total_tree_count/las_area_acres
-  trees_per_acre
-  
-  ###_______________________________###
-  ### Compile final stats dataframe ###
-  ###_______________________________###
-  
-  message("Compiling master stats dataframe ... ")
-  final_stats_dataframe = cbind(total_tree_count, trees_per_acre, max_tree_height, median_tree_height, mean_tree_height,
-                                sum_crown_area_ft2, sum_crown_area_acres, sum_basal_area_square_ft, sum_basal_area_acres)
-  
-  final_stats_dataframe = data.frame(final_stats_dataframe)
-  final_stats_dataframe
-  
-  ###___________________________________###
-  ### Write the final stats to the disk ###
-  ###___________________________________###
-  
-  message("Writing the final stats dataframe to the disk ... ")
-  setwd(config$delivery_spatial_dir)
-  write.csv(final_stats_dataframe, "final_tree_detection_stats.csv")
-  
-  ###________________###
-  ### Wrap things up ###
-  ###________________###
-  
-  master_end = Sys.time()
-  master_total = difftime(master_end, master_start, units = c("mins"))
-  message(" --- Final tree stats pipeline complete in ", master_total, " minutes ---")
-  return(final_stats_dataframe)
-  
-}
-
 ###_______________________________###
 ### Configure project directories ###
 ###_______________________________###
@@ -3854,7 +3708,7 @@ detect_final_crowns(config, desired_chm_res = 0.25, window_size, minimum_height,
 ### Run the crop and colorize by tree ID step ###
 ###___________________________________________###
 
-crop_crowns_by_id_and_colorize_stems_and_veg(config, las_grid, colorize_input_las, stem_color_hex, veg_color_hex, ground_color_hex,
+crop_crowns_by_id_and_colorize_stems_and_veg(config, las_grid, colorize_input_las, stem_color_hex_temp, veg_color_hex_temp, ground_color_hex_temp,
                                              use_bottom_up_crowns = FALSE)
 
 ###_____________________________________###
