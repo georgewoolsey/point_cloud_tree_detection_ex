@@ -1848,7 +1848,7 @@ This is an example of the full process:
 
 ### 1. Read Normalized Point Cloud
 
-```{r detect-stem-st1, webgl=FALSE, eval=F}
+```{r detect-stem-st1, webgl=FALSE, eval=T}
 # read single data tile
   las_norm_tile_temp = list.files(
       config$las_norm_tile_dir
@@ -1870,7 +1870,7 @@ plot3D::scatter3D(
 
 ### 2. Detect Stems
 
-```{r detect-stem-st2, webgl=FALSE, eval=F}
+```{r detect-stem-st2, webgl=FALSE, eval=T}
 # implement the tree detection function
 # this function is essentially TreeLS::treeMap(las, method = map.hough(...))
   treemap_temp = tree_map_function(las_norm_tile_temp)
@@ -1908,7 +1908,7 @@ plot3D::scatter3D(
 
 ### 3. Assign TreeID to Normalized Points
 
-```{r detect-stem-st3, webgl=FALSE, eval=F}
+```{r detect-stem-st3, webgl=FALSE, eval=T}
 ### Classify tree regions
   ## Assigns TreeIDs to a LAS object based on coordinates extracted from a treeMap object.
   las_norm_tile_temp = las_norm_tile_temp %>% 
@@ -1930,7 +1930,7 @@ plot3D::scatter3D(
 
 ### 4. Classify Normalized Points as Stem Points
 
-```{r detect-stem-st4, webgl=FALSE, eval=F}
+```{r detect-stem-st4, webgl=FALSE, eval=T}
 ### Classify stem points
   las_norm_tile_temp = TreeLS::stemPoints(
     las = las_norm_tile_temp
@@ -1975,7 +1975,7 @@ plot3D::scatter3D(
 
 ### 5. Estimate DBH from the Stem Points{#ex_est_dbh}
 
-```{r detect-stem-st5, webgl=FALSE, eval=F}
+```{r detect-stem-st5, webgl=FALSE, eval=T}
 ### Search through tree points and estimate DBH to return a data frame of results
   tree_inv_temp = TreeLS::tlsInventory(
     las = las_norm_tile_temp
@@ -3730,7 +3730,7 @@ remove(list = ls())
 gc()
 ```
 
-# Model Study Area DBH-to-Height Relationship
+# Model Regional DBH-to-Height Relationship{#mod-reg-fia}
 
 Before building a local [DBH-to-Height model](#model_run) using SfM extracted height, crown area, and competition metrics as independent variables, and the SfM-derived DBH as the dependent variable
 of DBH based on  DBH values extracted from the point cloud; the SfM-derived DBH estimates should be filtered using regionally derived height to DBH allometries. 
@@ -3756,7 +3756,7 @@ The workflow outlined below utilizes the TreeMap raster and tree-level attribute
 2. Pulls FIA tree list data using the plot identifiers and filter for only live trees with complete DBH and height measurements
 3. Builds the model representing the regional height to DBH relationship to use for filtering SfM-derived DBHs
 
-```{r, include=FALSE, eval=FALSE}
+```{r fia-mod-dta}
 ###__________________________________________________###
 ### BEGIN USER-DEFINED PARAMETERS ###
 ###__________________________________________________###
@@ -3802,11 +3802,31 @@ treemap_rast = treemap_rast %>%
       terra::vect() %>% 
       terra::project(terra::crs(treemap_rast))
   )
-# view
+### plot treemap raster
 # plot(treemap_rast)
+treemap_rast %>% 
+  as.data.frame(xy=T) %>% 
+  dplyr::rename(tm_id=3) %>% 
+  ggplot(mapping = aes(x=x,y=y,fill=as.factor(tm_id))) +
+    geom_tile(color="gray") +
+    geom_text(aes(label=tm_id), size=3, color = "gray11") +
+    scale_fill_viridis_d(option = "turbo", alpha = 0.8) +
+    coord_sf(expand = FALSE) +
+    theme_light() +
+    theme(legend.position = "none", panel.grid = element_blank())
+
+### get weights for weighting each tree in the population models
 # treemap id = tm_id for linking to tabular data 
-# terra::freq(treemap_rast) %>% dplyr::pull(value)
-# get tree list for 
+tm_id_weight_temp = terra::freq(treemap_rast) %>%
+  dplyr::select(-layer) %>% 
+  dplyr::rename(tm_id = value, tree_weight = count)
+
+tm_id_weight_temp %>% 
+  dplyr::slice_sample(n=6) %>% 
+  kableExtra::kbl(caption="TreeMap ID plot weights") %>% 
+    kableExtra::kable_styling()
+
+### get the TreeMap FIA tree list for only the plots included
 treemap_trees_df = readr::read_csv(
     "../data/treemap/TreeMap2016_tree_table.csv"
     , col_select = c(
@@ -3818,11 +3838,13 @@ treemap_trees_df = readr::read_csv(
     )
   ) %>% 
   dplyr::rename_with(tolower) %>% 
+  dplyr::inner_join(
+    tm_id_weight_temp
+    , by = dplyr::join_by("tm_id")
+  ) %>% 
   dplyr::filter(
-    # keep treemap id in area of interest 
-    tm_id %in% (terra::freq(treemap_rast) %>% dplyr::pull(value))
     # keep live trees only: 1=live;2=dead
-    & statuscd == 1
+    statuscd == 1
     & !is.na(dia) 
     & !is.na(ht) 
   ) %>%
@@ -3832,25 +3854,50 @@ treemap_trees_df = readr::read_csv(
   ) %>% 
   dplyr::select(-c(statuscd,dia,ht)) %>% 
   dplyr::rename(tree_id=tree) 
-  
-# str(treemap_trees_df)
-# treemap_trees_df %>% dplyr::count(tm_id)
 
+dplyr::glimpse(treemap_trees_df)
+# treemap_trees_df %>% dplyr::count(tm_id)
+```
+
+Modelling was done using the `brms` [package](https://paul-buerkner.github.io/brms/) to implement Bayesian regression in $\textbf{R}$ using the probabilistic programming language $\textbf{STAN}$.
+
+In the two models tested, we will ignore site/plot effects, such that all observations are treated as independent from one another. This is what’s known as complete pooling ([McElreath 2018](https://scholar.google.com/scholar?cluster=10434105833447834610&oi=gsb&hl=en&as_sdt=0,6)) or just a pooled model.
+
+## Quadratic Model of DBH on Height
+
+The first model tested is a quadratic linear model:
+
+\begin{align*}
+DBH_{i}  &\sim {\sf Gamma} \bigl(g(\beta_0, \beta_1, \beta_2, x_i) \bigr) \\
+g(\beta_0, \beta_1, \beta_2, x_i) &= {\exp \bigl(\beta_0 + \beta_1 x_{1i} + \beta_2 x_{1i}^{2}\bigr)} \\
+\; \textrm{where } x_1 &= \textrm{tree height}
+\end{align*}
+
+The $\sf Gamma$ response distribution represents $DBH_{i}$ as strictly non-negative. Utilizing a quadratic regression model with the inclusion of $x_{1i}^{2}$ in the model allows us to account for a nonlinear (e.g. parabolic) relationship between DBH and tree height.
+
+```{r fia-mod-m1, results='hide'}
 ###__________________________________________________________###
 ### model 1: population model, height quadratic
 ###__________________________________________________________###
   # population model with no random effects (i.e. no group-level variation)
   # quadratic model form with Gamma distribution for strictly positive response variable dbh
+  # set non-informative priors
   mod_quad_pop = brms::brm(
-    formula = dbh_cm ~ 1 + tree_height_m + I(tree_height_m^2)
+    formula = dbh_cm|weights(tree_weight) ~ 1 + tree_height_m + I(tree_height_m^2)
     , data = treemap_trees_df
     , family = brms::brmsfamily("Gamma")
-    , iter = 2000
+    , iter = 4000
   )
+  # brms::add_criterion(mod_quad_pop, "loo")
   # plot(mod_quad_pop)
   # summary(mod_quad_pop)
-  
-  #### extract posterior draws to a df
+  # brms::prior_summary(mod_quad_pop)
+```
+
+Summary of model results
+
+```{r fia-mod-m11}
+#### extract posterior draws to a df
     brms::as_draws_df(
         mod_quad_pop
         , variable = c("^b_", "shape")
@@ -3873,8 +3920,12 @@ treemap_trees_df = readr::read_csv(
         , digits = 3
       ) %>% 
         kableExtra::kable_styling()
-    
-  ### use tidybayes to summarize draws and plot
+```
+
+Parameter estimates and confidence intervals
+
+```{r fia-mod-m12}
+### use tidybayes to summarize draws and plot
     mod_quad_pop %>%
       tidybayes::gather_draws(
         `b_.*`
@@ -3914,8 +3965,12 @@ treemap_trees_df = readr::read_csv(
     #       geom_vline(xintercept = 0) +
     #       ggdist::geom_pointinterval() +
     #       theme_bw()
-  
-  ### obtain model predictions over range
+```
+
+Model predictions versus FIA tree data
+
+```{r fia-mod-m13}
+### obtain model predictions over range
     # range of x var to predict
       height_range = dplyr::tibble(
         tree_height_m = seq(
@@ -3972,10 +4027,26 @@ treemap_trees_df = readr::read_csv(
         theme_light() +
         theme(legend.position = "none", plot.title = element_text(size = 9))
     plt_mod_quad_pop
-# clean up
+```
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE, include=FALSE}
 remove(list = ls()[grep("_temp",ls())])
 gc()
+```
 
+## Non-Linear Model of DBH on Height{#nlm}
+
+The second model tested is a quadratic linear model:
+
+\begin{align*}
+DBH_{i}  &\sim {\sf Gamma} \bigl(g(\beta_1, \beta_2, x_i) \bigr) \\
+g(\beta_1, \beta_2, x_i) &= {\exp \bigl(\beta_1 x_{1i} + x_{1i}^{\beta_2}\bigr)} \\
+\; \textrm{where } x_1 &= \textrm{tree height}
+\end{align*}
+
+The $\sf Gamma$ response distribution represents $DBH_{i}$ as strictly non-negative.
+
+```{r fia-mod-m2, results='hide'}
 ###__________________________________________________________###
 ### model 2: population model, height non-linear
 ###__________________________________________________________###
@@ -3986,18 +4057,23 @@ gc()
     prior(normal(0, 2), nlpar = "b2")
   mod_nl_pop = brms::brm(
     formula = brms::bf(
-      formula = dbh_cm ~ (b1 * tree_height_m) + tree_height_m^b2
+      formula = dbh_cm|weights(tree_weight) ~ (b1 * tree_height_m) + tree_height_m^b2
       , b1 + b2 ~ 1
       , nl = TRUE # !! specify non-linear
     )
     , data = treemap_trees_df
     , prior = p_temp
     , family = brms::brmsfamily("Gamma")
-    , iter = 2000
+    , iter = 4000
   )
+  # brms::add_criterion(mod_nl_pop, "loo")
   # plot(mod_nl_pop)
   # summary(mod_nl_pop)
-  
+```
+
+Summary of model results
+
+```{r fia-mod-m21}
 #### extract posterior draws to a df
     brms::as_draws_df(
         mod_nl_pop
@@ -4024,8 +4100,12 @@ gc()
         , digits = 3
       ) %>% 
         kableExtra::kable_styling()
-    
-  ### use tidybayes to summarize draws and plot
+```
+
+Parameter estimates and confidence intervals
+
+```{r fia-mod-m22}
+### use tidybayes to summarize draws and plot
     mod_nl_pop %>%
       tidybayes::gather_draws(
         `b_.*`
@@ -4068,9 +4148,12 @@ gc()
     #       geom_vline(xintercept = 0) +
     #       ggdist::geom_pointinterval() +
     #       theme_bw()
-  
-  ### obtain model predictions over range
-      
+```
+
+Model predictions versus FIA tree data
+
+```{r fia-mod-m23}
+### obtain model predictions over range
     # predict and put estimates in a data frame
       pred_mod_nl_pop_temp = predict(
           mod_nl_pop
@@ -4118,33 +4201,50 @@ gc()
         theme_light() +
         theme(legend.position = "none", plot.title = element_text(size = 9))
       plt_mod_nl_pop
+```
 
-plt_mod_quad_pop + plt_mod_nl_pop
+## Model Comparison
 
+The pointwise log-likelihood can be used, among others, to calculate the leave-one-out cross-validation (LOO; [Vehtari, Gelman, and Gabry 2015](https://scholar.google.com/scholar?cluster=13592897121719449855&oi=gsb&hl=en&as_sdt=0,6)) allowing for comparison of different models applied to the same data (lower LOOs indicate better model fit).
+
+```{r fia-mod-comp}
 ### compare models
 # The pointwise log-likelihood can be used, among others, to calculate 
     # the Watanabe-Akaike information criterion (WAIC) proposed by Watanabe (2010) 
     # and leave-one-out cross-validation (LOO; Vehtari, Gelman, and Gabry 2015) 
     # both allowing to compare different models applied to the same data 
     # (lower WAICs and LOOs indicate better model fit).
-  brms::loo(mod_quad_pop, mod_nl_pop, compare = T, moment_match = T) %>% 
-    purrr::pluck("diffs") %>% 
-    dplyr::as_tibble(rownames = NA) %>% 
-    tibble::rownames_to_column("model") %>%
-    dplyr::mutate(model_rank = dplyr::row_number()) %>% 
-    dplyr::relocate(model_rank) %>%
-    dplyr::select(
-      tidyselect::starts_with("model")
-      , tidyselect::ends_with("_diff")
-      , tidyselect::ends_with("looic")
-    ) %>% 
+  dplyr::bind_rows(
+    brms::loo(mod_quad_pop) %>% 
+      purrr::pluck("estimates") %>% 
+      dplyr::as_tibble(rownames = NA) %>% 
+      tibble::rownames_to_column("metric") %>% 
+      dplyr::mutate(model = "mod_quad_pop")
+    , brms::loo(mod_nl_pop) %>% 
+      purrr::pluck("estimates") %>% 
+      dplyr::as_tibble(rownames = NA) %>% 
+      tibble::rownames_to_column("metric") %>% 
+      dplyr::mutate(model = "mod_nl_pop")
+  ) %>% 
+  dplyr::filter(metric == "looic") %>% 
+  dplyr::arrange(`Estimate`) %>% 
+  dplyr::mutate(model_rank = dplyr::row_number()) %>% 
+    dplyr::relocate(model_rank, model) %>%
       kableExtra::kbl(
         caption = "model comparison based on leave-one-out cross-validation (LOO)"
         , digits = 3
       ) %>% 
         kableExtra::kable_styling()
-# clean up
+
+```
+
+Based on this data, the [non-linear model](#nlm) of DBH on height has a better fit.
+
+```{r fia-mod-comp2}
+plt_mod_quad_pop + plt_mod_nl_pop
+```
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE, include=FALSE}
 remove(list = ls()[grep("_temp",ls())])
 gc()
 ```
-
