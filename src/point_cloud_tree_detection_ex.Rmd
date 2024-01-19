@@ -92,14 +92,12 @@ library(latex2exp) # math formulas with latex
 library(terra) # raster
 library(sf) # simple features
 library(sfarrow) # sf to Apache-Parquet files for working with large files
-library(geometry) # mesh generation and surface tessellation
-library(exactextractr) #summarizes raster values over polygonal areas ("zonal statistics")
 
 # point cloud processing
 library(lidR)
 library(ForestTools) # for crown delineation but relies on depreciated `raster`
 library(raster) # !! this was depreciated in 2023, used for ForestTools
-library(rlas)
+library(rlas) # write las index files .lax
 ## lidR::watershed requires EBImage::watershed 
   # install.packages("BiocManager")
   # BiocManager::install("EBImage")
@@ -122,22 +120,18 @@ library(Metrics)
 library(RCSF) # for the cloth simulation filter (csf) to classify points
 
 # parallel computing
-library(ini) # Parse simple '.ini' configuration files to an structured list
+# library(ini) # Parse simple '.ini' configuration files to an structured list
 library(parallel) # parallel
 library(doParallel)
 library(foreach) # facilitates parallelization by lapply'ing %dopar% on for loop
 
 # visualization
 library(mapview) # interactive html maps
-library(randomcoloR)
-library(plot3D)
-library(rgl) # more 3d visualization
+library(plot3D) # 3d visualization
+library(rgl) # 3d visualization
 
 # others
-library(dbscan)
-library(deldir)
 library(tools)
-# library(forestmangr) # easy forestry metrics
 
 ```
 
@@ -2001,7 +1995,7 @@ plot3D::scatter3D(
   )
   # class(tree_inv_temp)
   # tree_inv_temp %>% dplyr::glimpse()
-  
+
   # add details to table and convert to sf data
   tree_inv_temp = tree_inv_temp %>% 
     dplyr::mutate(
@@ -3732,6 +3726,425 @@ plot3D::scatter3D(
 ```
 
 ```{r, warning=FALSE, message=FALSE, echo=FALSE, include=FALSE}
+remove(list = ls())
+gc()
+```
+
+# Model Study Area DBH-to-Height Relationship
+
+Before building a local [DBH-to-Height model](#model_run) using SfM extracted height, crown area, and competition metrics as independent variables, and the SfM-derived DBH as the dependent variable
+of DBH based on  DBH values extracted from the point cloud; the SfM-derived DBH estimates should be filtered using regionally derived height to DBH allometries. 
+
+The DBH filtering methodology described by [Tinkham et al. (2022)](https://scholar.google.com/scholar?cluster=14807895789640069059&hl=en&as_sdt=0,6) is *not* applied here:
+
+*This filtering used local Forest Inventory and Analysis (FIA) data from the study region to develop...a model representing the regional height to DBH relationship. This model used FIA data from Colorado with greater than 70% ponderosa pine by basal area, densities exceeding 10 m^2^ ha^−1^ basal area represented untreated conditions, and site indices within 3 m of the study site’s estimated site index of 22 m at a base age of 100 years were used to maintain a similar height to DBH relationship. Based on the results from Swayze et al. (2021), the model was fit as a second order polynomial using the stats R package. Subsequently, Equation (3) was applied to predict a regionally expected DBH value for each tree height. For trees with multiple SfM-derived DBH values, we compared each estimate to the predictions from Equation (3) and retained the SfM-derived DBH with the smallest error.* 
+
+Filtering was done *against the 90th percentile prediction bounds of Equation (3). If a SfM-derived DBH was outside these bounds, we removed it from the dataset used for further analysis. This process resulted in a dataset with the height for all identified trees and a subset of DBH values meeting regional observations of tree growth form.*
+
+Equation 3:
+$$
+\textrm{DBH (cm)} = 1.6121 \times \textrm{Height (m)} + \textrm{Height (m)}^{0.0276}
+$$
+
+Expanding this filtering methodology to other areas where Equation (3) may or may not be appropriate requires the use of Forest Inventory and Analysis (FIA) data to develop a model representing the height to DBH relationship in the particular study region. While multiple R packages exist to access FIA data (e.g. `FIESTA` and `rFIA`), the tree-level data required for building such a model is either too sparse or too coarse ([Tinkham et al. 2018](https://scholar.google.com/scholar?cluster=14954246388987201871&oi=gsb&hl=en&as_sdt=0,6)). FIA sample plots are widely separated and do not provide wall-to-wall coverage of forest information while [state-level tree lists](https://apps.fs.usda.gov/fia/datamart/datamart.html) span diverse forest types that may not accurately represent a particular area of interest. Furthermore, expecting a spatial analyst to select the most appropriate FIA data to use to represent the point cloud data study area may be an unreasonable expectation as these analysts are often are not part of the data acquisition.
+
+TreeMap is a 30×30m-resolution gridded dataset of forest plot identifers developed by [Riley et al. (2021)](https://scholar.google.com/scholar?cluster=10696389844245769168&oi=gsb&hl=en&as_sdt=0,6) that imputes representative FIA plots across the forests of the conterminous United States (CONUS). This raster map of representative plot identifers can be linked to a number of tree- and plot-level attributes stored in the accompanying tables or accessed via one of the previously mentioned R packages or [FIA datamart]((https://apps.fs.usda.gov/fia/datamart/datamart.html). 
+
+The workflow outlined below utilizes the TreeMap raster and tree-level attributes which *the user must download* (~4 GB) from [this repository](https://doi.org/10.2737/RDS-2021-0074) ("RDS-2021-0074_Data.zip" as of 2024-01-18). The user must then define the directory location `input_treemap_dir` of the extracted files `TreeMap2016.tif` and `TreeMap2016_tree_table.csv` reside. The workflow then:
+
+1. Identifies representative FIA sample plots within the bounds of the point cloud data specificed by the user in `input_las_dir`
+2. Pulls FIA tree list data using the plot identifiers and filter for only live trees with complete DBH and height measurements
+3. Builds the model representing the regional height to DBH relationship to use for filtering SfM-derived DBHs
+
+```{r, include=FALSE, eval=FALSE}
+###__________________________________________________###
+### BEGIN USER-DEFINED PARAMETERS ###
+###__________________________________________________###
+###_________________________###
+### Set input las directory ###
+###_________________________###
+input_las_dir = "../data/las_raw"
+###_________________________###
+### Set input treemap directory ###
+###_________________________###
+input_treemap_dir = "../data/treemap"
+###__________________________________________________###
+### END USER-DEFINED PARAMETERS ###
+###__________________________________________________###
+
+###__________________________________________________###
+### load libraries so this section can be run in stand-alone ###
+###__________________________________________________###
+
+library(tidyverse)
+library(terra)
+library(lidR)
+library(brms)
+library(tidybayes)
+library(ggdist)
+library(patchwork) #combine plots
+library(kableExtra)
+
+###__________________________________________________###
+### read in data ###
+###__________________________________________________###
+
+# read in treemap data
+# downloaded from: https://www.fs.usda.gov/rds/archive/Catalog/RDS-2021-0074
+las_ctg = lidR::readALSLAScatalog("../data/las_raw/")
+# read in treemap (no memory is taken)
+treemap_rast = terra::rast("../data/treemap/TreeMap2016.tif")
+# filter treemap based on las
+treemap_rast = treemap_rast %>% 
+  terra::crop(
+    las_ctg@data$geometry %>% 
+      sf::st_union() %>% 
+      terra::vect() %>% 
+      terra::project(terra::crs(treemap_rast))
+  )
+# view
+# plot(treemap_rast)
+# treemap id = tm_id for linking to tabular data 
+# terra::freq(treemap_rast) %>% dplyr::pull(value)
+# get tree list for 
+treemap_trees_df = readr::read_csv(
+    "../data/treemap/TreeMap2016_tree_table.csv"
+    , col_select = c(
+      tm_id
+      , TREE
+      , STATUSCD
+      , DIA
+      , HT
+    )
+  ) %>% 
+  dplyr::rename_with(tolower) %>% 
+  dplyr::filter(
+    # keep treemap id in area of interest 
+    tm_id %in% (terra::freq(treemap_rast) %>% dplyr::pull(value))
+    # keep live trees only: 1=live;2=dead
+    & statuscd == 1
+    & !is.na(dia) 
+    & !is.na(ht) 
+  ) %>%
+  dplyr::mutate(
+    dbh_cm = dia*2.54
+    , tree_height_m = ht/3.28084
+  ) %>% 
+  dplyr::select(-c(statuscd,dia,ht)) %>% 
+  dplyr::rename(tree_id=tree) 
+  
+# str(treemap_trees_df)
+# treemap_trees_df %>% dplyr::count(tm_id)
+
+###__________________________________________________________###
+### model 1: population model, height quadratic
+###__________________________________________________________###
+  # population model with no random effects (i.e. no group-level variation)
+  # quadratic model form with Gamma distribution for strictly positive response variable dbh
+  mod_quad_pop = brms::brm(
+    formula = dbh_cm ~ 1 + tree_height_m + I(tree_height_m^2)
+    , data = treemap_trees_df
+    , family = brms::brmsfamily("Gamma")
+    , iter = 2000
+  )
+  # plot(mod_quad_pop)
+  # summary(mod_quad_pop)
+  
+  #### extract posterior draws to a df
+    brms::as_draws_df(
+        mod_quad_pop
+        , variable = c("^b_", "shape")
+        , regex = TRUE
+      ) %>% 
+      # quick way to get a table of summary statistics and diagnostics
+      posterior::summarize_draws(
+        "mean", "median", "sd"
+        ,  ~quantile(.x, probs = c(
+          0.05, 0.95
+          # , 0.025, 0.975
+        ))
+        , "rhat"
+      ) %>% 
+      kableExtra::kbl(
+        caption = paste(
+          "quadratic model:"
+          , mod_quad_pop$formula %>% as.character() %>% purrr::pluck(1)
+        )
+        , digits = 3
+      ) %>% 
+        kableExtra::kable_styling()
+    
+  ### use tidybayes to summarize draws and plot
+    mod_quad_pop %>%
+      tidybayes::gather_draws(
+        `b_.*`
+        # , `shape`
+        , regex = TRUE
+      ) %>% 
+      dplyr::rename_with(~stringr::str_remove_all(.x, "\\.")) %>% 
+        ggplot(aes(y = variable, x = value)) +
+          geom_vline(xintercept = 0, color = "gray44", linetype = "dashed") +
+          ggdist::stat_interval(.width = c(0.5, 0.9, 0.95), alpha = 0.8) +
+          # ggdist::stat_halfeye() +
+          stat_summary(
+            fun = "median"
+            , color = "black"
+            , size = 2
+            , geom = "point"
+          ) +
+          scale_color_viridis_d(option = "mako") +
+          labs(y = "", x = "parameter estimate") +
+          theme_bw() +
+          theme(
+            legend.position = "bottom"
+            , legend.direction = "horizontal"
+            , panel.grid = element_blank()
+          )
+    # plot another way
+    # mod_quad_pop %>%
+    #   tidybayes::gather_draws(
+    #     `b_.*`
+    #     # , `shape`
+    #     , regex = TRUE
+    #   ) %>% 
+    #   tidybayes::median_qi(
+    #     .width = c(0.95, 0.5) #,.66)
+    #   ) %>% 
+    #     ggplot(aes(y = .variable, x = .value, xmin = .lower, xmax = .upper)) +
+    #       geom_vline(xintercept = 0) +
+    #       ggdist::geom_pointinterval() +
+    #       theme_bw()
+  
+  ### obtain model predictions over range
+    # range of x var to predict
+      height_range = dplyr::tibble(
+        tree_height_m = seq(
+          from = 0
+          , to = round(max(treemap_trees_df$tree_height_m)*1.05,0)
+          , by = 1
+        )
+      )
+      
+    # predict and put estimates in a data frame
+      pred_mod_quad_pop_temp = predict(
+          mod_quad_pop
+          , newdata = height_range
+          , probs = c(.05, .95) # c(.025, .975)
+        ) %>%
+        dplyr::as_tibble() %>%
+        dplyr::rename(
+          lower_b = 3, upper_b = 4
+        ) %>% 
+        dplyr::rename_with(tolower) %>% 
+        dplyr::bind_cols(height_range)
+      # str(pred_mod_quad_pop_temp)
+      
+    # plot predictions with data
+      plt_mod_quad_pop = ggplot(
+        data = treemap_trees_df
+        , mapping = aes(x = tree_height_m)
+      ) +
+        geom_ribbon(
+          data = pred_mod_quad_pop_temp
+          , mapping = aes(ymin = lower_b, ymax = upper_b)
+          , fill = "grey88"
+        ) +
+        geom_line(
+          data = pred_mod_quad_pop_temp
+          , aes(y = estimate)
+          , color = "navy"
+          , lwd = 1
+        ) +
+        geom_point(
+          mapping = aes(y = dbh_cm)
+          , color = "gray33"
+          , alpha = 0.7
+        ) +
+        scale_y_continuous(limits = c(0, max(treemap_trees_df$dbh_cm)*1.45 )) +
+        labs(
+          y = "DBH (cm)"
+          , x = "Tree Ht. (m)"
+          , title = paste(
+              "quadratic model:"
+              , mod_quad_pop$formula %>% as.character() %>% purrr::pluck(1)
+            )
+        ) +
+        theme_light() +
+        theme(legend.position = "none", plot.title = element_text(size = 9))
+    plt_mod_quad_pop
+# clean up
+remove(list = ls()[grep("_temp",ls())])
+gc()
+
+###__________________________________________________________###
+### model 2: population model, height non-linear
+###__________________________________________________________###
+  # population model with no random effects (i.e. no group-level variation)
+  # quadratic model form with Gamma distribution for strictly positive response variable dbh
+  # set up prior
+  p_temp <- prior(normal(1, 2), nlpar = "b1") +
+    prior(normal(0, 2), nlpar = "b2")
+  mod_nl_pop = brms::brm(
+    formula = brms::bf(
+      formula = dbh_cm ~ (b1 * tree_height_m) + tree_height_m^b2
+      , b1 + b2 ~ 1
+      , nl = TRUE # !! specify non-linear
+    )
+    , data = treemap_trees_df
+    , prior = p_temp
+    , family = brms::brmsfamily("Gamma")
+    , iter = 2000
+  )
+  # plot(mod_nl_pop)
+  # summary(mod_nl_pop)
+  
+#### extract posterior draws to a df
+    brms::as_draws_df(
+        mod_nl_pop
+        , variable = c("^b_", "shape")
+        , regex = TRUE
+      ) %>% 
+      # quick way to get a table of summary statistics and diagnostics
+      posterior::summarize_draws(
+        "mean", "median", "sd"
+        ,  ~quantile(.x, probs = c(
+          0.05, 0.95
+          # , 0.025, 0.975
+        ))
+        , "rhat"
+      ) %>% 
+      dplyr::mutate(
+        variable = stringr::str_remove_all(variable, "_Intercept")
+      ) %>% 
+      kableExtra::kbl(
+        caption = paste(
+          "non-linear model:"
+          , mod_nl_pop$formula %>% as.character() %>% purrr::pluck(1)
+        )
+        , digits = 3
+      ) %>% 
+        kableExtra::kable_styling()
+    
+  ### use tidybayes to summarize draws and plot
+    mod_nl_pop %>%
+      tidybayes::gather_draws(
+        `b_.*`
+        # , `shape`
+        , regex = TRUE
+      ) %>% 
+      dplyr::rename_with(~stringr::str_remove_all(.x, "\\.")) %>% 
+      dplyr::mutate(
+        variable = stringr::str_remove_all(variable, "_Intercept")
+      ) %>% 
+        ggplot(aes(y = variable, x = value)) +
+          geom_vline(xintercept = 0, color = "gray44", linetype = "dashed") +
+          ggdist::stat_interval(.width = c(0.5, 0.9, 0.95), alpha = 0.8) +
+          # ggdist::stat_halfeye() +
+          stat_summary(
+            fun = "median"
+            , color = "black"
+            , size = 2
+            , geom = "point"
+          ) +
+          scale_color_viridis_d(option = "mako") +
+          labs(y = "", x = "parameter estimate") +
+          theme_bw() +
+          theme(
+            legend.position = "bottom"
+            , legend.direction = "horizontal"
+            , panel.grid = element_blank()
+          )
+    # plot another way
+    # mod_nl_pop %>%
+    #   tidybayes::gather_draws(
+    #     `b_.*`
+    #     # , `shape`
+    #     , regex = TRUE
+    #   ) %>% 
+    #   tidybayes::median_qi(
+    #     .width = c(0.95, 0.5) #,.66)
+    #   ) %>% 
+    #     ggplot(aes(y = .variable, x = .value, xmin = .lower, xmax = .upper)) +
+    #       geom_vline(xintercept = 0) +
+    #       ggdist::geom_pointinterval() +
+    #       theme_bw()
+  
+  ### obtain model predictions over range
+      
+    # predict and put estimates in a data frame
+      pred_mod_nl_pop_temp = predict(
+          mod_nl_pop
+          , newdata = height_range
+          , probs = c(.05, .95) # c(.025, .975)
+        ) %>%
+        dplyr::as_tibble() %>%
+        dplyr::rename(
+          lower_b = 3, upper_b = 4
+        ) %>% 
+        dplyr::rename_with(tolower) %>% 
+        dplyr::bind_cols(height_range)
+      # str(pred_mod_nl_pop_temp)
+      
+    # plot predictions with data
+      plt_mod_nl_pop = ggplot(
+        data = treemap_trees_df
+        , mapping = aes(x = tree_height_m)
+      ) +
+        geom_ribbon(
+          data = pred_mod_nl_pop_temp
+          , mapping = aes(ymin = lower_b, ymax = upper_b)
+          , fill = "grey88"
+        ) +
+        geom_line(
+          data = pred_mod_nl_pop_temp
+          , aes(y = estimate)
+          , color = "navy"
+          , lwd = 1
+        ) +
+        geom_point(
+          mapping = aes(y = dbh_cm)
+          , color = "gray33"
+          , alpha = 0.7
+        ) +
+        scale_y_continuous(limits = c(0, max(treemap_trees_df$dbh_cm)*1.45 )) +
+        labs(
+          y = "DBH (cm)"
+          , x = "Tree Ht. (m)"
+          , title = paste(
+              "non-linear model:"
+              , mod_nl_pop$formula %>% as.character() %>% purrr::pluck(1)
+            )
+        ) +
+        theme_light() +
+        theme(legend.position = "none", plot.title = element_text(size = 9))
+      plt_mod_nl_pop
+
+plt_mod_quad_pop + plt_mod_nl_pop
+
+### compare models
+# The pointwise log-likelihood can be used, among others, to calculate 
+    # the Watanabe-Akaike information criterion (WAIC) proposed by Watanabe (2010) 
+    # and leave-one-out cross-validation (LOO; Vehtari, Gelman, and Gabry 2015) 
+    # both allowing to compare different models applied to the same data 
+    # (lower WAICs and LOOs indicate better model fit).
+  brms::loo(mod_quad_pop, mod_nl_pop, compare = T, moment_match = T) %>% 
+    purrr::pluck("diffs") %>% 
+    dplyr::as_tibble(rownames = NA) %>% 
+    tibble::rownames_to_column("model") %>%
+    dplyr::mutate(model_rank = dplyr::row_number()) %>% 
+    dplyr::relocate(model_rank) %>%
+    dplyr::select(
+      tidyselect::starts_with("model")
+      , tidyselect::ends_with("_diff")
+      , tidyselect::ends_with("looic")
+    ) %>% 
+      kableExtra::kbl(
+        caption = "model comparison based on leave-one-out cross-validation (LOO)"
+        , digits = 3
+      ) %>% 
+        kableExtra::kable_styling()
+# clean up
 remove(list = ls()[grep("_temp",ls())])
 gc()
 ```
+
