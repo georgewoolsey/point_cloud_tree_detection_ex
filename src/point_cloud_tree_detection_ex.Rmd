@@ -994,9 +994,9 @@ The process loops over each ground point cloud grid tile and creates a DTM raste
 It is worth noting that the `lidR` [package](https://cran.r-project.org/web/packages/lidR/lidR.pdf) includes a `rasterize_terrain` function which interpolates the ground points (in a classified point cloud *that has not been normalized*) and creates a rasterized digital terrain model. The algorithm uses the points classified as "ground" and "water" (Classification = 2 and 9, respectively) to compute the interpolation. How well the edges of the dataset are interpolated depends on the interpolation method used. A buffer around the region of interest is always recommended to avoid edge effects. This function can be implemented via:
 
 ```{r ex-rasterize-terrain, include=TRUE, eval=FALSE}
-dtm1 = rasterize_terrain(las, algorithm = knnidw(k = 6L, p = 2))
-dtm2 = rasterize_terrain(las, algorithm = tin())
-dtm3 = rasterize_terrain(las, algorithm = kriging(k = 10L))
+dtm1 = lidR::rasterize_terrain(las, algorithm = knnidw(k = 6L, p = 2))
+dtm2 = lidR::rasterize_terrain(las, algorithm = tin())
+dtm3 = lidR::rasterize_terrain(las, algorithm = kriging(k = 10L))
 # plot results
 plot(dtm1, col = gray(0:25/25))
 plot(dtm2, col = gray(0:25/25))
