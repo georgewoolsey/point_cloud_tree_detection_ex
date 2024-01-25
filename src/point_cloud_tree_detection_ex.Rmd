@@ -1772,7 +1772,7 @@ write_stem_las_fn <- function(las_path_name) {
             ) %>% 
             sf::st_as_sf(coords = c("X", "Y"), crs = sf::st_crs(las_norm_tile)) %>% 
             dplyr::select(
-              treeID, H, , stem_x, stem_y, Radius, Error
+              treeID, H, stem_x, stem_y, Radius, Error
               , dbh_m, dbh_cm, basal_area_m2, basal_area_ft2
             ) %>% 
             dplyr::rename(
