@@ -567,116 +567,65 @@ if(
 }
 #################################################################################
 #################################################################################
-# Height normalize points using DTM raster
-#################################################################################
-#################################################################################
-  las_normalize_fn = function(las_file_dir, dtm = NULL, out_dir){
-    
-    lidar_list = list.files(las_file_dir, pattern = ".*\\.(laz|las)$", full.names = F)
-    
-    # configure parallel
-    cores = parallel::detectCores()
-    cluster = parallel::makeCluster(cores)
-    # register the parallel backend with the `foreach` package
-    doParallel::registerDoParallel(cluster)
-    
-    # pass to foreach to process each lidar file in parallel
-    # foreach::foreach(i = 1:length(lidar_list)) %dopar% {
-    foreach::foreach(i = 1:2) %dopar% {
-      
-      ### current file
-      des_tile_name = lidar_list[i]
-      # des_file
-      
-      ### Compile the out file name
-      des_out_tile = paste0(
-          out_dir
-          , "/"
-          , tools::file_path_sans_ext(des_tile_name)
-          , "_normalize.las"
-        )
-      
-      ### See if the .lax version exists in the input directory
-      does_file_exist = file.exists(des_out_tile)
-      # does_file_exist
-      
-      ### If file does_file_exist, do nothing
-      if(does_file_exist == TRUE){return(NULL)}
-      
-      ### If file doesnt exsist do it
-      if(does_file_exist == FALSE){
-        
-        ### Read in the lidar tile
-          las_tile = lidR::readLAS(paste0(
-            las_file_dir
-            , "/"
-            , des_tile_name
-          ))
-          
-          ### Height normalize the file
-          if(class(dtm) == "SpatRaster"){
-            las_tile = lidR::normalize_height(las_tile, algorithm = dtm)
-          }else{
-            las_tile = lidR::normalize_height(las_tile, algorithm = knnidw())
-          }
-          
-          ### Remove points below 0.05
-          las_tile = lidR::filter_poi(las_tile, Z > -0.05)
-          
-          ### If las isnt empty, write the las to the disk
-          if(is.null(las_tile) == FALSE & lidR::is.empty(las_tile) == FALSE){
-            
-            ### Overwrite the existing file
-            lidR::writeLAS(
-              las_tile
-              , file = des_out_tile
-              # , file = "../data/point_cloud_processing_temp/02_normalize/fkn.las"
-            )
-            
-          }
-        
-      }
-      
-    }
-    parallel::stopCluster(cluster)
-    # end_time = Sys.time()
-    # total_time = difftime(end_time, start_time, units = c("mins"))
-    # message("Total lax index time took ", total_time, " minutes ... ")
-  }
-
-  ### test
-  las_normalize_fn(
-    las_file_dir = config$las_classify_dir
-    , dtm = dtm_rast
-    , out_dir = config$las_normalize_dir
-  )
-    
- 
-  ### call las normalize function
-    st_time_temp = Sys.time()
-    
-    las_normalize_fn(
-      las_file_dir = config$las_classify_dir
-      , dtm = dtm_rast
-      , out_dir = config$las_normalize_dir
-    )
-    
-    end_time_temp = Sys.time()
-    message("height normalization complete in ", difftime(end_time_temp, st_time_temp, units = c("mins")),  " minutes ... ")
-    
-    las_normalize_flist
-  # create spatial index files (.lax)
-    create_lax_for_tiles(las_normalize_flist)
-#################################################################################
-#################################################################################
-# Height normalize points and create canopy height model (CHM) raster
+# Height normalize points 
 #################################################################################
 #################################################################################
 if(
   # do las and lax files already exist?
   length(raw_las_files) != length(las_normalize_flist)
   | length(raw_las_files) != length(normalize_lax_files)
-  | (file.exists(chm_file_name) == F)
+){
+    
+
+  # turn on parallel
+  # las_normalize_fn = function(flist = las_classify_flist, out_dir = config$las_normalize_dir){
+  #   las_classify_ctg = lidR::readLAScatalog(flist)
+  #   opt_output_files(las_classify_ctg) = paste0(out_dir, "/{*}_normalize")
+  #   cores = parallel::detectCores()
+  #   cl = parallel::makeCluster(cores)
+  #   on.exit(parallel::stopCluster(cl))
+  #   lidR::normalize_height(las_classify_ctg, algorithm = knnidw())
+  # }
+  # ### execute
+  # las_normalize_ans = las_normalize_fn()
+  # las_normalize_ans
+  
+  las_classify_ctg = lidR::readLAScatalog(las_classify_flist)
+  opt_output_files(las_classify_ctg) = paste0(config$las_normalize_dir, "/{*}_normalize")
+  las_normalize_ans = lidR::normalize_height(las_classify_ctg, algorithm = knnidw())
+  gc()
+  
+  # create spatial index files (.lax)
+    las_normalize_flist = list.files(config$las_normalize_dir, pattern = ".*\\.(laz|las)$", full.names = T)
+    create_lax_for_tiles(
+      las_file_list = las_normalize_flist
+    )
+  
+  # list.files(las_normalize_flist)[1] %>% 
+  #   lidR::readLAS() %>% 
+  #   plot()
+  # 
+}
+    
+
+#################################################################################
+#################################################################################
+# Height normalize points and create canopy height model (CHM) raster
+#################################################################################
+#################################################################################
+
+# !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+# !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+# this is really slow with the lasR::normalize pipeline...try another way
+# !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+# !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+if(
+  FALSE
+  # do las and lax files already exist?
+  # length(raw_las_files) != length(las_normalize_flist)
+  # | length(raw_las_files) != length(normalize_lax_files)
+  # | (file.exists(chm_file_name) == F)
 ){
     # note, this section throws the error:
         # ERROR 1: PROJ: proj_create_from_database: Cannot find proj.db
@@ -770,7 +719,3 @@ if(
 # do something
 #################################################################################
 #################################################################################
-
-opt_output_files(ctg) <-  paste0(tempdir(), "/{*}_norm")
-ctg_norm <- normalize_height(ctg, dtm)
-    
