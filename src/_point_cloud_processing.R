@@ -26,8 +26,8 @@
   ### Set input las directory ###
   ###_________________________###
   # !!!!!!!!!! ENSURE FILES ARE PROJECTED IN CRS THAT USES METRE AS MEASURMENT UNIT
-  # input_las_dir = "../data/big_las_raw"
-  input_las_dir = "../data/small_las_raw"
+  input_las_dir = "../data/big_las_raw"
+  # input_las_dir = "../data/small_las_raw"
   ###_________________________###
   ### Set input TreeMap directory ###
   ###_________________________###
@@ -68,6 +68,7 @@
   # spatial analysis
   library(terra) # raster
   library(sf) # simple features
+  library(sfarrow) # sf to Apache-Parquet files for working with large files
   
   # point cloud processing
   library(lidR)
@@ -99,9 +100,9 @@
   library(brms) # bayesian modelling using STAN engine
   
   # parallel computing
-  library(parallel) # parallel
-  library(doParallel)
-  library(foreach) # facilitates parallelization by lapply'ing %dopar% on for loop
+  # library(parallel) # parallel
+  # library(doParallel)
+  # library(foreach) # facilitates parallelization by lapply'ing %dopar% on for loop
   
 #################################################################################
 #################################################################################
@@ -123,8 +124,8 @@
     las_normalize_dir = file.path(temp_dir, "02_normalize")
     dtm_dir = file.path(temp_dir, "03_dtm")
     chm_dir = file.path(temp_dir, "04_chm")
-    treetops_dir = file.path(temp_dir, "05_treetops")
-    treecrowns_dir = file.path(temp_dir, "06_treecrowns")
+    las_stem_dir = file.path(temp_dir, "05_las_stem")
+    stem_poly_tile_dir = file.path(temp_dir, "06_stem_poly_tile")
     
     ### Create the directories
     dir.create(delivery_dir, showWarnings = FALSE)
@@ -134,8 +135,8 @@
     dir.create(las_normalize_dir, showWarnings = FALSE)
     dir.create(dtm_dir, showWarnings = FALSE)
     dir.create(chm_dir, showWarnings = FALSE)
-    dir.create(treetops_dir, showWarnings = FALSE)
-    dir.create(treecrowns_dir, showWarnings = FALSE)
+    dir.create(las_stem_dir, showWarnings = FALSE)
+    dir.create(stem_poly_tile_dir, showWarnings = FALSE)
     
     ###______________________________###
     ### Set names of the directories ###
@@ -151,8 +152,8 @@
     names(las_normalize_dir) = "las_normalize_dir"
     names(dtm_dir) = "dtm_dir"
     names(chm_dir) = "chm_dir"
-    names(treetops_dir) = "treetops_dir"
-    names(treecrowns_dir) = "treecrowns_dir"
+    names(las_stem_dir) = "las_stem_dir"
+    names(stem_poly_tile_dir) = "stem_poly_tile_dir"
     
     ###______________________________###
     ### Append to output config list ###
@@ -162,7 +163,7 @@
       rootdir, input_las_dir, input_treemap_dir
       , delivery_dir, temp_dir, las_grid_dir, las_classify_dir
       , las_normalize_dir, dtm_dir, chm_dir
-      , treetops_dir, treecrowns_dir
+      , las_stem_dir, stem_poly_tile_dir
     )
     
     config = as.data.frame(config)
@@ -199,65 +200,25 @@
 #################################################################################
 #################################################################################
   ## see: https://r-lidar.github.io/lidRbook/spatial-indexing.html
-  ## !!!! NOTE: THIS UTILIZES PARALLEL COMPUTING WHICH MAY OR MAY NOT WORK ON PROCESSING MACHINE
-  ## !!!! NOTE: THIS UTILIZES PARALLEL COMPUTING WHICH MAY OR MAY NOT WORK ON PROCESSING MACHINE
   ### Function to generate .lax index files for input directory path
   create_lax_for_tiles = function(las_file_list){
-    ## desired_las_dir = config$input_las_dir
-    ###__________________________________________###
-    ### Create a lax index file for the las file ###
-    ###__________________________________________###
-    # message(paste0("Initializing .lax indexing for ", desired_las_dir, " ... "))
-    # las_list = list.files(desired_las_dir, pattern = ".las")
-    # laz_list = list.files(desired_las_dir, pattern = ".laz")
-    # lidar_list = append(las_list, laz_list)
-    lidar_list = las_file_list
-    
-    # message("Indexing ", length(lidar_list), " las files ... ")
-    
-    # start_time = Sys.time()
-    # configure parallel
-    cores = parallel::detectCores()
-    cluster = parallel::makeCluster(cores)
-    # register the parallel backend with the `foreach` package
-    doParallel::registerDoParallel(cluster)
-    # pass to foreach to process each lidar file in parallel
-    foreach::foreach(i = 1:length(lidar_list)) %dopar% {
-      
-      ### Get the desired file
-      des_file = lidar_list[i]
-      # des_file
-      
-      ### Compile the .lax file name
-      des_file_lax = tools::file_path_sans_ext(des_file)
-      des_file_lax = paste0(des_file_lax, ".lax")
-      
-      # des_file_lax_path = paste0(desired_las_dir, "/", des_file_lax)
-      # # des_file_lax_path
-      
-      ### See if the .lax version exists in the input directory
-      does_file_exist = file.exists(des_file_lax)
-      # does_file_exist
-      
-      ### If file does_file_exist, do nothing
-      if(does_file_exist == TRUE){return(NULL)}
-      
-      ### If file doesnt exsist, create a .lax index
-      if(does_file_exist == FALSE){
+    ans = 
+      las_file_list %>% 
+      purrr::map(function(des_file){
+        ### Compile the .lax file name
+        des_file_lax = tools::file_path_sans_ext(des_file)
+        des_file_lax = paste0(des_file_lax, ".lax")
         
-        ### Append the directory path to the las file
-        # path = paste0(desired_las_dir, "/", des_file)
+        ### See if the .lax version exists in the input directory
+        does_file_exist = file.exists(des_file_lax)
+        # does_file_exist
         
-        ### Write index
-        rlas::writelax(des_file)
+        ### If file does_file_exist, do nothing
+        if(does_file_exist == TRUE){return(NULL)}
         
-      }
-      
-    }
-    parallel::stopCluster(cluster)
-    # end_time = Sys.time()
-    # total_time = difftime(end_time, start_time, units = c("mins"))
-    # message("Total lax index time took ", total_time, " minutes ... ")
+        ### If file doesnt exsist, create a .lax index
+        if(does_file_exist == FALSE){rlas::writelax(des_file)}
+      })
   }
 
 #################################################################################
@@ -330,6 +291,7 @@
       #       geom_sf(data = las_grid, color = "black", alpha = 0) +
       #       scale_fill_viridis_d() +
       #       theme_light() + theme(legend.position = "none")
+    
     # clean up
       remove(list = ls()[grep("_temp",ls())])
       gc()
@@ -365,8 +327,10 @@
 #################################################################################
 if(
   # do las and lax files already exist?
-  length(raw_las_files) != length(las_classify_flist)
-  | length(raw_las_files) != length(classify_lax_files)
+  min(stringr::word(basename(raw_las_files),sep = "_tile") %in%
+    stringr::word(basename(las_classify_flist),sep = "_tile")) != 1
+  | min(stringr::word(basename(raw_las_files),sep = "_tile") %in%
+    stringr::word(basename(classify_lax_files),sep = "_tile")) != 1
 ){
   ###______________________________###
   # denoise with lasR::classify_isolated_points
@@ -407,8 +371,10 @@ if(
 #################################################################################
 if(
   # do las and lax files already exist?
-  length(raw_las_files) != length(las_classify_flist)
-  | length(raw_las_files) != length(classify_lax_files)
+  min(stringr::word(basename(raw_las_files),sep = "_tile") %in%
+    stringr::word(basename(las_classify_flist),sep = "_tile")) != 1
+  | min(stringr::word(basename(raw_las_files),sep = "_tile") %in%
+    stringr::word(basename(classify_lax_files),sep = "_tile")) != 1
 ){
   ###______________________________###
   # classify ground points
@@ -561,6 +527,7 @@ if(
     
     # clean up
     remove(list = ls()[grep("_temp",ls())])
+    remove(las_dtm_flist)
     gc()
 }else if(file.exists(dtm_file_name) == T){
   dtm_rast = terra::rast(dtm_file_name)
@@ -572,60 +539,44 @@ if(
 #################################################################################
 if(
   # do las and lax files already exist?
-  length(raw_las_files) != length(las_normalize_flist)
-  | length(raw_las_files) != length(normalize_lax_files)
+  min(stringr::word(basename(raw_las_files),sep = "_tile") %in%
+    stringr::word(basename(las_nomralize_flist),sep = "_tile")) != 1
+  | min(stringr::word(basename(raw_las_files),sep = "_tile") %in%
+    stringr::word(basename(normalize_lax_files),sep = "_tile")) != 1
 ){
-    
-
-  # turn on parallel
-  # las_normalize_fn = function(flist = las_classify_flist, out_dir = config$las_normalize_dir){
-  #   las_classify_ctg = lidR::readLAScatalog(flist)
-  #   opt_output_files(las_classify_ctg) = paste0(out_dir, "/{*}_normalize")
-  #   cores = parallel::detectCores()
-  #   cl = parallel::makeCluster(cores)
-  #   on.exit(parallel::stopCluster(cl))
-  #   lidR::normalize_height(las_classify_ctg, algorithm = knnidw())
-  # }
-  # ### execute
-  # las_normalize_ans = las_normalize_fn()
-  # las_normalize_ans
   
+  # set up las ctg
   las_classify_ctg = lidR::readLAScatalog(las_classify_flist)
+  # redirect results to output 
   opt_output_files(las_classify_ctg) = paste0(config$las_normalize_dir, "/{*}_normalize")
+  # turn off early exit
+  opt_stop_early(las_classify_ctg) = FALSE
+  # normalize
   las_normalize_ans = lidR::normalize_height(las_classify_ctg, algorithm = knnidw())
   gc()
   
+  # get file list
+  las_normalize_flist = list.files(config$las_normalize_dir, pattern = ".*\\.(laz|las)$", full.names = T)
+  
   # create spatial index files (.lax)
-    las_normalize_flist = list.files(config$las_normalize_dir, pattern = ".*\\.(laz|las)$", full.names = T)
-    create_lax_for_tiles(
-      las_file_list = las_normalize_flist
-    )
+  create_lax_for_tiles(las_normalize_flist)
   
   # list.files(las_normalize_flist)[1] %>% 
   #   lidR::readLAS() %>% 
   #   plot()
-  # 
+
+  # clean up
+    remove(list = ls()[grep("_temp",ls())])
+    gc()
 }
-    
 
 #################################################################################
 #################################################################################
-# Height normalize points and create canopy height model (CHM) raster
+# Create canopy height model (CHM) raster in lasR pipeline
 #################################################################################
 #################################################################################
-
-# !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-# !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-# this is really slow with the lasR::normalize pipeline...try another way
-# !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-# !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-
 if(
-  FALSE
-  # do las and lax files already exist?
-  # length(raw_las_files) != length(las_normalize_flist)
-  # | length(raw_las_files) != length(normalize_lax_files)
-  # | (file.exists(chm_file_name) == F)
+  file.exists(chm_file_name) == F
 ){
     # note, this section throws the error:
         # ERROR 1: PROJ: proj_create_from_database: Cannot find proj.db
@@ -653,29 +604,17 @@ if(
       )
     
     # build and execute lasR::processor
-      # these files will be used for detecting tree stem DBH and creating a CHM
-    las_norm_chm_flist = lasR::processor(
-        lasR::reader(las_classify_flist, filter = "-drop_noise -drop_duplicates") + 
-        lasR::normalize(extrabytes = F) +
-        lasR::write_las(
-          ofile = paste0(config$las_normalize_dir, "/*_normalize.las")
-          , filter = "-drop_z_below 0"
-        ) + 
+      # these files will be used for detecting tree tops and tree crowns
+    las_chm_flist = lasR::processor(
+        lasR::reader(las_normalize_flist, filter = "-drop_z_below 0") + 
         # create chm
         lasr_chm_step +
         # pitfill chm
         lasr_chm_pit_step
       )
     
-    # las_norm_chm_flist %>% str()
-    # las_norm_chm_flist$rasterize %>% terra::plot()
-    
-    # create spatial index files (.lax)
-    las_normalize_flist = las_norm_chm_flist$write_las
-    create_lax_for_tiles(las_normalize_flist)
-    
     # extract raster from result
-    chm_rast = extract_rast_fn(las_norm_chm_flist)
+    chm_rast = extract_rast_fn(las_chm_flist)
     # chm_rast %>% terra::plot()
 
     # fill cells that are missing still with the mean of a window
@@ -709,6 +648,8 @@ if(
     
     # clean up
     remove(list = ls()[grep("_temp",ls())])
+    remove(list = ls()[grep("_step",ls())])
+    remove(las_chm_flist)
     gc()
 }else if(file.exists(chm_file_name) == T){
   chm_rast = terra::rast(chm_file_name)
@@ -716,6 +657,287 @@ if(
 
 #################################################################################
 #################################################################################
-# do something
+# Detect tree stems 
 #################################################################################
 #################################################################################
+
+  ###_____________________________________________________###
+  ### Define function to map for potential tree locations ###
+  ### Using TreeLS::treeMap                               ###
+  ###_____________________________________________________###
+  ### Function to map for potential tree locations with error handling
+    tree_map_function <- function(las){
+      result <- tryCatch(
+        expr = {
+          map = TreeLS::treeMap(
+            las = las
+            , method = map.hough(
+              # height thresholds applied to filter a point cloud before processing
+              min_h = 1
+              , max_h = 5
+              # height interval to perform point filtering/assignment/classification
+              , h_step = 0.5
+              # pixel side length to discretize the point cloud layers 
+                # while performing the Hough Transform circle search
+              , pixel_size = 0.025
+              # largest tree diameter expected in the point cloud
+              , max_d = 0.75 # 0.75m = 30in
+              # minimum point density (0 to 1) within a pixel evaluated 
+                # on the Hough Transform - i.e. only dense point clousters will undergo circle search
+                # hey google, define "clouster" ?
+              , min_density = 0.0001
+              # minimum number of circle intersections over a pixel 
+                # to assign it as a circle center candidate.
+              , min_votes = 3
+            )
+            # parameter passed down to treeMap.merge (if merge > 0)
+            , merge = 0
+          )
+        },
+        error = function(e) {
+          message <- paste("Error:", e$message)
+          return(message)
+        }
+      )
+      if (inherits(result, "error")) {
+        return(result)
+      } else {
+        return(result)
+      }
+    }
+  
+  ## Define the stem processing function
+    # This function combines `TreeLS` processing to the normalized point cloud to: 
+    # 
+    # 1) Apply the `TreeLS::treeMap` [stem detection function](#detect_stem_fn)
+    # 2) Merge overlapping tree coordinates using `TreeLS::treeMap.merge`
+    # 3) Assign tree IDs to the original points using `TreeLS::treePoints`
+    # 4) Flag only the stem points using `TreeLS::stemPoints`
+    # 5) DBH estimation is done using `TreeLS::tlsInventory`
+    # 
+    # The result writes: 
+      # i) a `laz` to the `r config$las_stem_dir` directory with the 
+      #   `Classification` data updated to: 
+      #     ground points (class 2); 
+      #     water points (class 9); 
+      #     stem points (class 4); non-stem (class 5). 
+      # ii) Also written is a `parquet` file with the tree identification stem locations, heights, and DBH estimates.
+  
+  # pass this function a file path of the normalized las you wish to detect stems and classify
+  write_stem_las_fn <- function(las_path_name) {
+      ### Get the desired las file
+      las_name = basename(las_path_name)
+      # las_name
+      
+      ### See if the las file has been generated
+      path_to_check = paste0(config$las_stem_dir, "/", las_name)
+      does_file_exist = file.exists(path_to_check)
+      # does_file_exist
+      ### See if the vector file has been generated
+      path_to_check = paste0(config$stem_poly_tile_dir, "/", tools::file_path_sans_ext(las_name), ".parquet")
+      does_file_exist2 = file.exists(path_to_check)
+      # does_file_exist2
+      
+      if(does_file_exist == TRUE & does_file_exist2 == TRUE){
+        message("stem detect for grid number ", las_name, " already exists guy ... ")
+        return(FALSE)
+      }
+      
+      ### Read in the desired las file
+      las_norm_tile = lidR::readLAS(las_path_name)
+      las_norm_tile = lidR::filter_duplicates(las_norm_tile)
+      # plot(las_norm_tile)
+      
+      # get the maximum point height
+      max_point_height = max(las_norm_tile@data$Z)
+      
+      ###____________________________________________________________###
+      ### If the max point height is below X feet, return classified tile ###
+      ###____________________________________________________________###
+      
+      if(max_point_height < 2){
+          message("No points >2m for grid number ", las_name, " so skipped it ... ")
+        return(FALSE)
+      }
+      
+      ###______________________________________________________________###
+      ### If the max point height is above X feet, try to detect stems ###
+      ###______________________________________________________________###
+      
+      if(max_point_height >= 2){
+        ###______________________________________________________________###
+        ### 1) Apply the `TreeLS::treeMap` [stem detection function](#detect_stem_fn)
+        ###______________________________________________________________###
+        ### Run the function to search for candidate locations
+        treemap_temp = tree_map_function(las_norm_tile)
+        
+        ### Get a logic check
+        check = class(treemap_temp)
+        # check
+        
+        ###_______________________________________________________________###
+        ### If the class of the result === Character, then no stems found ###
+        ###_______________________________________________________________###
+        
+        if(check == "character"){
+          message("No stems detected for grid number ", las_name, " so skipped it ... ")
+          return(FALSE)
+        }
+        
+        ### If the class of the result == "LAS"
+        if(check == "LAS"){
+          
+          ###___________________________________###
+          ### Classify the tree and stem points ###
+          ###___________________________________###
+          
+          ###______________________________________________________________###
+          ### 2) Merge overlapping tree coordinates using `TreeLS::treeMap.merge`
+          ###______________________________________________________________###
+          treemap_temp = TreeLS::treeMap.merge(treemap_temp)
+          
+          ###______________________________________________________________###
+          ### 3) Assign tree IDs to the original points using `TreeLS::treePoints`
+          ###______________________________________________________________###
+          ### Classify tree regions
+          ## Assigns TreeIDs to a LAS object based on coordinates extracted from a treeMap object.
+          las_norm_tile = TreeLS::treePoints(
+            las = las_norm_tile
+            , map = treemap_temp
+            , method = trp.crop(l = 3)
+          )
+          # plot(las_norm_tile, color = "TreeID")
+          
+          ###______________________________________________________________###
+          ### 4) Flag only the stem points using `TreeLS::stemPoints`
+          ###______________________________________________________________###
+          ### Classify stem points
+          las_norm_tile = TreeLS::stemPoints(
+            las = las_norm_tile
+            , method = stm.hough(
+              # height interval to perform point filtering/assignment/classification.
+              h_step = 0.5
+              # largest tree diameter expected in the point cloud
+              , max_d = 0.75 # 0.75m = 30in
+              # tree base height interval to initiate circle search
+              , h_base = c(1, 2.5)
+              #  pixel side length to discretize the point cloud layers 
+                # while performing the Hough Transform circle search.
+              , pixel_size = 0.025
+              # minimum point density (0 to 1) within a pixel evaluated 
+                # on the Hough Transform - i.e. only dense point clousters will undergo circle search
+                # hey google, define "clouster" ?
+              , min_density = 0.1
+              # minimum number of circle intersections over a pixel 
+                # to assign it as a circle center candidate.
+              , min_votes = 3
+            )
+          )
+          
+          ###______________________________________________________________###
+          ### 5) DBH estimation is done using `TreeLS::tlsInventory`
+          ###______________________________________________________________###
+          ### Search through tree points and estimate DBH to return a data frame of results
+            tree_inv_df = TreeLS::tlsInventory(
+              las = las_norm_tile
+              # height layer (above ground) to estimate stem diameters, in point cloud units
+              , dh = 1.37
+              # height layer width, in point cloud units
+              , dw = 0.2
+              # parameterized shapeFit function, i.e. method to use for diameter estimation.
+              , d_method = shapeFit(
+                # either "circle" or "cylinder".
+                shape = "circle"
+                # optimization method for estimating the shape's parameters
+                , algorithm = "ransac"
+                # number of points selected on every RANSAC iteration.
+                , n = 20
+              )
+            )
+            # class(tree_inv_df)
+            # tree_inv_df %>% dplyr::glimpse()
+          ###_______________________________________________________###
+          ### clean up the DBH stem data frame ###
+          ###_______________________________________________________###
+            # add details to table and convert to sf data
+            tree_inv_df = tree_inv_df %>% 
+              dplyr::mutate(
+                Radius = as.numeric(Radius)
+                , dbh_m = Radius*2
+                , dbh_cm = dbh_m*100
+                , basal_area_m2 = pi * (Radius)^2
+                , basal_area_ft2 = basal_area_m2 * 10.764
+                , treeID = paste0(X, "_", Y)
+                , stem_x = X
+                , stem_y = Y
+              ) %>% 
+              sf::st_as_sf(coords = c("X", "Y"), crs = sf::st_crs(las_norm_tile)) %>% 
+              dplyr::select(
+                treeID, H, , stem_x, stem_y, Radius, Error
+                , dbh_m, dbh_cm, basal_area_m2, basal_area_ft2
+              ) %>% 
+              dplyr::rename(
+                tree_height_m = H
+                , radius_m = Radius
+                , radius_error_m = Error
+              )
+            # tree_inv_df %>% dplyr::glimpse()
+            
+            ### Remove points outside the bounding box of the laz tile + 1m buffer
+            tree_inv_df = tree_inv_df %>% 
+              sf::st_crop(
+                sf::st_bbox(las_norm_tile) %>% 
+                  sf::st_as_sfc() %>% 
+                  sf::st_buffer(1)
+              )
+          
+          ###_______________________________________________________###
+          ### Set the classification codes of different point types ###
+          ###_______________________________________________________###
+          
+          ### Pull out the stem files
+          stem_points = lidR::filter_poi(las_norm_tile, Stem == TRUE)
+          stem_points@data$Classification = 4
+          
+          ### Pull out the ground points
+          ground = filter_poi(las_norm_tile, Classification %in% c(2,9))
+          
+          ### Pull out the remaining points that arent ground
+          remaining_points = filter_poi(las_norm_tile, Stem == FALSE & !(Classification %in% c(2,9)))
+          remaining_points@data$Classification = 5
+          
+          ### Combine the newly classified data
+          las_reclassified = rbind(stem_points, ground, remaining_points)
+          # str(las_reclassified)
+          # class(las_reclassified)
+          # plot(las_reclassified, color = "Classification")
+          
+          ###_______________________________________________________###
+          ### Write output to disk ###
+          ###_______________________________________________________###
+          ### Write the stem points to the disk
+          lidR::writeLAS(las_reclassified, paste0(config$las_stem_dir, "/", las_name))
+          message("Wrote stem detect laz for grid number ", las_name, " successfully ... ")
+          ### Write stem polygons to the disk
+          out_name = tools::file_path_sans_ext(las_name)
+          out_name = paste0(config$stem_poly_tile_dir, "/", out_name, ".parquet")
+          sfarrow::st_write_parquet(tree_inv_df, out_name)
+          message("Wrote stem detect vector data for grid number ", las_name, " successfully ... ")
+          
+          # return(las_norm_tile)
+          return(TRUE)
+        }
+      }
+  }
+  
+  # map over the normalized point cloud tiles
+    list.files(config$las_normalize_dir, pattern = ".*\\.(laz|las)$", full.names = T) %>%
+      purrr::map(write_stem_las_fn)
+  
+  # get file list
+  las_stem_flist = list.files(config$las_stem_dir, pattern = ".*\\.(laz|las)$", full.names = T)
+  
+  # create spatial index files (.lax)
+  create_lax_for_tiles(las_stem_flist)
+  
+  
