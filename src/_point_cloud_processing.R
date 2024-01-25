@@ -116,17 +116,26 @@
     ###___________________________________________________###
     temp_dir = file.path(rootdir, "point_cloud_processing_temp")
     delivery_dir = file.path(rootdir, "point_cloud_processing_delivery")
-    output_dir = file.path(rootdir, "02_processed_data")
   
     ### Set output directory for temporary files
-    las_classify_dir = file.path(temp_dir, "00_classify")
-    las_normalize_dir = file.path(temp_dir, "01_normalize")
+    las_grid_dir = file.path(temp_dir, "00_grid")
+    las_classify_dir = file.path(temp_dir, "01_classify")
+    las_normalize_dir = file.path(temp_dir, "02_normalize")
+    dtm_dir = file.path(temp_dir, "03_dtm")
+    chm_dir = file.path(temp_dir, "04_chm")
+    treetops_dir = file.path(temp_dir, "05_treetops")
+    treecrowns_dir = file.path(temp_dir, "06_treecrowns")
     
     ### Create the directories
     dir.create(delivery_dir, showWarnings = FALSE)
     dir.create(temp_dir, showWarnings = FALSE)
+    dir.create(las_grid_dir, showWarnings = FALSE)
     dir.create(las_classify_dir, showWarnings = FALSE)
     dir.create(las_normalize_dir, showWarnings = FALSE)
+    dir.create(dtm_dir, showWarnings = FALSE)
+    dir.create(chm_dir, showWarnings = FALSE)
+    dir.create(treetops_dir, showWarnings = FALSE)
+    dir.create(treecrowns_dir, showWarnings = FALSE)
     
     ###______________________________###
     ### Set names of the directories ###
@@ -137,8 +146,13 @@
     names(input_treemap_dir) = "input_treemap_dir"
     names(delivery_dir) = "delivery_dir"
     names(temp_dir) = "temp_dir"
+    names(las_grid_dir) = "las_grid_dir"
     names(las_classify_dir) = "las_classify_dir"
     names(las_normalize_dir) = "las_normalize_dir"
+    names(dtm_dir) = "dtm_dir"
+    names(chm_dir) = "chm_dir"
+    names(treetops_dir) = "treetops_dir"
+    names(treecrowns_dir) = "treecrowns_dir"
     
     ###______________________________###
     ### Append to output config list ###
@@ -146,8 +160,9 @@
     
     config = cbind(
       rootdir, input_las_dir, input_treemap_dir
-      , delivery_dir, temp_dir, las_classify_dir
-      , las_normalize_dir
+      , delivery_dir, temp_dir, las_grid_dir, las_classify_dir
+      , las_normalize_dir, dtm_dir, chm_dir
+      , treetops_dir, treecrowns_dir
     )
     
     config = as.data.frame(config)
@@ -160,6 +175,24 @@
   # call the function
   config = create_project_structure(rootdir, input_las_dir)
 
+#################################################################################
+#################################################################################
+# Function to extract raster from list for use later
+#################################################################################
+#################################################################################
+  # extract only raster to work with
+  extract_rast_fn = function(x) {
+    if(class(x) == "SpatRaster"){
+      return(x)
+    } else if(
+        class(x) == "list"
+        & length(purrr::keep(x, inherits, "SpatRaster"))==1
+      ){
+      r = purrr::keep(x, inherits, "SpatRaster") %>% 
+        purrr::pluck(1)
+      return(r)
+    }else{stop("No raster found or >1 raster found")}
+  }
 #################################################################################
 #################################################################################
 # Function to create spatial index files (.lax) for classified las
@@ -203,14 +236,14 @@
       # # des_file_lax_path
       
       ### See if the .lax version exists in the input directory
-      does_file_exsist = file.exists(des_file_lax)
-      # does_file_exsist
+      does_file_exist = file.exists(des_file_lax)
+      # does_file_exist
       
-      ### If file exsists, do nothing
-      if(does_file_exsist == TRUE){return(NULL)}
+      ### If file does_file_exist, do nothing
+      if(does_file_exist == TRUE){return(NULL)}
       
       ### If file doesnt exsist, create a .lax index
-      if(does_file_exsist == FALSE){
+      if(does_file_exist == FALSE){
         
         ### Append the directory path to the las file
         # path = paste0(desired_las_dir, "/", des_file)
@@ -229,15 +262,89 @@
 
 #################################################################################
 #################################################################################
+# Tile raw las files to work with smaller chunks
+#################################################################################
+#################################################################################
+  ### point to input las files as a lidR LAScatalog (reads the header of all the LAS files of a given folder)
+  las_ctg = lidR::readLAScatalog(config$input_las_dir)
+  ### Pull the las extent geometry
+  las_grid = las_ctg@data$geometry %>% 
+      sf::st_union() %>% 
+      sf::st_make_grid(100) %>% 
+      sf::st_as_sf() %>% 
+      dplyr::mutate(grid_id = dplyr::row_number())
+  ### define clip raw las to geometry with lasR pipeline
+    lasr_clip_polygon = function(
+        geometry, files, buffer, ofile_dir = tempdir()
+      ){
+        if(sf::st_geometry_type(geometry, FALSE) != "POLYGON"){ stop("Expected POLYGON geometry type")}
+        # get bbox of polygon
+        bbox = sf::st_bbox(geometry)
+        # file name
+        fnm = paste0(
+          ofile_dir
+          , "/"
+          , bbox[1]
+          , "_", bbox[2]
+          , "_", bbox[3]
+          , "_", bbox[4]
+          , "_tile.las"
+        )
+        # check file exists
+        if(file.exists(fnm)==T){stop("File exists")}
+        
+        # read las files with buffer step
+        read = lasR::reader_rectangles(
+          files
+          , xmin = bbox[1]
+          , ymin = bbox[2]
+          , xmax = bbox[3]
+          , ymax = bbox[4]
+          , filter = ""
+          , buffer = buffer
+        )
+        # write las files step
+        stage = lasR::write_las(ofile = fnm, filter = lasR::drop_duplicates(), keep_buffer = T)
+        # pass to lasR::processor
+        ans = lasR::processor(read+stage)
+        return(ans)
+      }
+    
+    # wrap in safe to eat error and continue processing
+      safe_lasr_clip_polygon = purrr::safely(lasr_clip_polygon)
+    # map function over all geometries
+      create_grid_las_list = 
+        las_grid %>% 
+          sf::st_geometry() %>% 
+          purrr::map(safe_lasr_clip_polygon, files = las_ctg, buffer = 10, ofile_dir = config$las_grid_dir)
+    # create spatial index files (.lax)
+      create_lax_for_tiles(
+        las_file_list = list.files(config$las_grid_dir, pattern = ".*\\.(laz|las)$", full.names = T)
+      )
+    
+      # lidR::readLAScatalog(config$las_grid_dir)@data$geometry %>% 
+      #   sf::st_as_sf() %>% 
+      #   dplyr::mutate(id = dplyr::row_number()) %>% 
+      #     ggplot() +
+      #       geom_sf(aes(fill=as.factor(id)), alpha = 0.8) +
+      #       geom_sf(data = las_grid, color = "black", alpha = 0) +
+      #       scale_fill_viridis_d() +
+      #       theme_light() + theme(legend.position = "none")
+    # clean up
+      remove(list = ls()[grep("_temp",ls())])
+      gc()
+      
+#################################################################################
+#################################################################################
 # Set up file names and checks
 #################################################################################
 #################################################################################
   ###______________________________###
   # set up lasR read file list
   ###______________________________###
-    raw_las_files = list.files(config$input_las_dir, pattern = ".*\\.(laz|las)$", full.names = T)
+    raw_las_files = list.files(config$las_grid_dir, pattern = ".*\\.(laz|las)$", full.names = T)
     # pull crs for using in write operations
-    proj_crs = lidR::readLAScatalog(raw_las_files) %>% sf::st_crs() %>% purrr::pluck(1)
+    proj_crs = las_ctg %>% sf::st_crs() %>% purrr::pluck(1)
   ###______________________________###
   # check file lists
   ###______________________________###
@@ -247,6 +354,9 @@
     # normalize
     las_normalize_flist = list.files(config$las_normalize_dir, pattern = ".*_normalize\\.(laz|las)$", full.names = T)
     normalize_lax_files = list.files(config$las_normalize_dir, pattern = ".*_normalize\\.lax$", full.names = T)
+    # rasters
+    dtm_file_name = paste0(config$delivery_dir, "/dtm_1m.tif")
+    chm_file_name = paste0(config$delivery_dir, "/chm_", desired_chm_res, "m.tif")
 
 #################################################################################
 #################################################################################
@@ -366,7 +476,7 @@ if(
 #################################################################################
 #################################################################################
 if(
-  file.exists(paste0(config$delivery_dir, "/dtm_1m.tif")) == F
+  file.exists(dtm_file_name) == F
 ){
   ###______________________________###
   # create DTM raster using Delaunay triangulation and pit fill
@@ -396,12 +506,12 @@ if(
       # rasterize the result of the Delaunay triangulation
       rast = lasR::rasterize(res = res, tri)
       # Pits and spikes filling for raster with algorithm from St-Onge 2008 (see reference).
-      pit = lasR::pit_fill(rast, ofile = ofile)
+      pit = lasR::pit_fill(raster = rast, ofile = ofile)
       # define pipeline
       pipeline = tri + rast + pit
       # pass to lasR::processor or return
-      lasR::processor(lasR::reader(files, filter = filter) + pipeline)
-      # return(pipeline)
+      ans = lasR::processor(lasR::reader(files, filter = filter) + pipeline)
+      return(ans)
       
     }
     
@@ -409,17 +519,19 @@ if(
       # these files will be used to mosaic over full extent
     las_dtm_flist = lasr_dtm_pipeline(
       files = las_classify_flist
-      # , ofile = paste0(config$temp_dir, "/*_dtm_1m.tif")
+      # , ofile = paste0(config$dtm_dir, "/*_dtm_1m.tif")
+      , ofile = ""
       , res = 1
       , max_edge = c(0,1)
       , add_class = 9 # include water in dtm
     )
-
-    # las_dtm_flist
-    # las_dtm_flist[["rasterize"]] %>% plot()
+    
+    # extract raster from result
+    dtm_rast = extract_rast_fn(las_dtm_flist)
+    # dtm_rast %>% terra::plot()
 
     # fill cells that are missing still with the mean of a window
-      las_dtm_flist[["rasterize"]] = las_dtm_flist[["rasterize"]] %>%
+      dtm_rast = dtm_rast %>%
         terra::focal(
           w = 3
           , fun = "mean"
@@ -431,17 +543,18 @@ if(
           , na.policy = "only"
         )
     # set crs
-      terra::crs(las_dtm_flist[["rasterize"]]) = proj_crs
-      # las_dtm_flist[["rasterize"]] %>% terra::crs()
-      # las_dtm_flist[["rasterize"]] %>% plot()
+      terra::crs(dtm_rast) = proj_crs
+      # dtm_rast %>% terra::crs()
+      # dtm_rast %>% terra::plot()
+    
     # write to delivery directory
       terra::writeRaster(
-        las_dtm_flist[["rasterize"]]
-        , filename = paste0(config$delivery_dir, "/dtm_1m.tif")
+        dtm_rast
+        , filename = dtm_file_name
         , overwrite = T
       )
       
-      # paste0(config$delivery_dir, "/dtm_1m.tif") %>% 
+      # dtm_file_name %>% 
       #   terra::rast() %>% 
       #   terra::crs()
       #   plot()
@@ -449,87 +562,175 @@ if(
     # clean up
     remove(list = ls()[grep("_temp",ls())])
     gc()
+}else if(file.exists(dtm_file_name) == T){
+  dtm_rast = terra::rast(dtm_file_name)
 }
 #################################################################################
 #################################################################################
-# Height normalize points
+# Height normalize points using DTM raster
+#################################################################################
+#################################################################################
+  las_normalize_fn = function(las_file_dir, dtm = NULL, out_dir){
+    
+    lidar_list = list.files(las_file_dir, pattern = ".*\\.(laz|las)$", full.names = F)
+    
+    # configure parallel
+    cores = parallel::detectCores()
+    cluster = parallel::makeCluster(cores)
+    # register the parallel backend with the `foreach` package
+    doParallel::registerDoParallel(cluster)
+    
+    # pass to foreach to process each lidar file in parallel
+    # foreach::foreach(i = 1:length(lidar_list)) %dopar% {
+    foreach::foreach(i = 1:2) %dopar% {
+      
+      ### current file
+      des_tile_name = lidar_list[i]
+      # des_file
+      
+      ### Compile the out file name
+      des_out_tile = paste0(
+          out_dir
+          , "/"
+          , tools::file_path_sans_ext(des_tile_name)
+          , "_normalize.las"
+        )
+      
+      ### See if the .lax version exists in the input directory
+      does_file_exist = file.exists(des_out_tile)
+      # does_file_exist
+      
+      ### If file does_file_exist, do nothing
+      if(does_file_exist == TRUE){return(NULL)}
+      
+      ### If file doesnt exsist do it
+      if(does_file_exist == FALSE){
+        
+        ### Read in the lidar tile
+          las_tile = lidR::readLAS(paste0(
+            las_file_dir
+            , "/"
+            , des_tile_name
+          ))
+          
+          ### Height normalize the file
+          if(class(dtm) == "SpatRaster"){
+            las_tile = lidR::normalize_height(las_tile, algorithm = dtm)
+          }else{
+            las_tile = lidR::normalize_height(las_tile, algorithm = knnidw())
+          }
+          
+          ### Remove points below 0.05
+          las_tile = lidR::filter_poi(las_tile, Z > -0.05)
+          
+          ### If las isnt empty, write the las to the disk
+          if(is.null(las_tile) == FALSE & lidR::is.empty(las_tile) == FALSE){
+            
+            ### Overwrite the existing file
+            lidR::writeLAS(
+              las_tile
+              , file = des_out_tile
+              # , file = "../data/point_cloud_processing_temp/02_normalize/fkn.las"
+            )
+            
+          }
+        
+      }
+      
+    }
+    parallel::stopCluster(cluster)
+    # end_time = Sys.time()
+    # total_time = difftime(end_time, start_time, units = c("mins"))
+    # message("Total lax index time took ", total_time, " minutes ... ")
+  }
+
+  ### test
+  las_normalize_fn(
+    las_file_dir = config$las_classify_dir
+    , dtm = dtm_rast
+    , out_dir = config$las_normalize_dir
+  )
+    
+ 
+  ### call las normalize function
+    st_time_temp = Sys.time()
+    
+    las_normalize_fn(
+      las_file_dir = config$las_classify_dir
+      , dtm = dtm_rast
+      , out_dir = config$las_normalize_dir
+    )
+    
+    end_time_temp = Sys.time()
+    message("height normalization complete in ", difftime(end_time_temp, st_time_temp, units = c("mins")),  " minutes ... ")
+    
+    las_normalize_flist
+  # create spatial index files (.lax)
+    create_lax_for_tiles(las_normalize_flist)
+#################################################################################
+#################################################################################
+# Height normalize points and create canopy height model (CHM) raster
 #################################################################################
 #################################################################################
 if(
   # do las and lax files already exist?
   length(raw_las_files) != length(las_normalize_flist)
   | length(raw_las_files) != length(normalize_lax_files)
+  | (file.exists(chm_file_name) == F)
 ){
     # note, this section throws the error:
         # ERROR 1: PROJ: proj_create_from_database: Cannot find proj.db
         # no documentation on this error or how to fix...
         # this is caused by lasR::write_las not writing with crs
-  
-    # build and execute lasR::processor
-      # these files will be used for detecting tree stem DBH and creating a CHM
-    las_normalize_flist = lasR::processor(
-        lasR::reader(las_classify_flist, filter = "-drop_noise -drop_duplicates") + 
-        lasR::normalize() +
-        lasR::write_las(ofile = paste0(config$las_normalize_dir, "/*_normalize.las"))
+    
+    #set up chm pipeline step
+      # operators = "max" is analogous to `lidR::rasterize_canopy(algorithm = p2r())`
+      # for each pixel of the output raster the function attributes the height of the highest point found
+      lasr_chm_step = lasR::rasterize(
+        res = desired_chm_res
+        , operators = "max"
+        , filter = paste0(
+          "-drop_class 2 9 -drop_z_below "
+          , minimum_tree_height
+          , " -drop_z_above "
+          , max_height_threshold
+        )
+      )
+    # Pits and spikes filling for raster with algorithm from St-Onge 2008 (see reference).
+      lasr_chm_pit_step = lasR::pit_fill(
+        raster = lasr_chm_step
+        # , ofile = paste0(config$chm_dir, "/*_chm.tif")
+        , ofile = ""
       )
     
+    # build and execute lasR::processor
+      # these files will be used for detecting tree stem DBH and creating a CHM
+    las_norm_chm_flist = lasR::processor(
+        lasR::reader(las_classify_flist, filter = "-drop_noise -drop_duplicates") + 
+        lasR::normalize(extrabytes = F) +
+        lasR::write_las(
+          ofile = paste0(config$las_normalize_dir, "/*_normalize.las")
+          , filter = "-drop_z_below 0"
+        ) + 
+        # create chm
+        lasr_chm_step +
+        # pitfill chm
+        lasr_chm_pit_step
+      )
+    
+    # las_norm_chm_flist %>% str()
+    # las_norm_chm_flist$rasterize %>% terra::plot()
+    
     # create spatial index files (.lax)
+    las_normalize_flist = las_norm_chm_flist$write_las
     create_lax_for_tiles(las_normalize_flist)
     
-    # las_normalize_flist
-    # lidR::readLAS(las_normalize_flist[1]) %>% plot(color = "Classification")
-    # lidR::readLAS(las_normalize_flist[1])@data %>% dplyr::count(Classification)
-    
-    # clean up
-    remove(list = ls()[grep("_temp",ls())])
-    gc()
-}
-
-#################################################################################
-#################################################################################
-# Create canopy height model from normalized tiles
-#################################################################################
-#################################################################################
-
-    lasr_chm_pipeline = function(
-      files
-      , ofile = paste0(tempdir(), "/*_chm_1m.tif")
-      # chm parameters
-      , res = 1
-      , max_edge = 0
-    ){
-      # set up filter
-      filter = lasR::keep_ground()
-      if (!is.null(add_class)) filter = filter + lasR::keep_class(add_class)
-      # Delaunay triangulation
-      tri = lasR::triangulate(max_edge = max_edge, filter = filter)
-      # rasterize the result of the Delaunay triangulation
-      rast = lasR::rasterize(res = res, tri)
-      # Pits and spikes filling for raster with algorithm from St-Onge 2008 (see reference).
-      pit = lasR::pit_fill(rast, ofile = ofile)
-      # define pipeline
-      pipeline = tri + rast + pit
-      # pass to lasR::processor or return
-      lasR::processor(lasR::reader(files, filter = filter) + pipeline)
-      # return(pipeline)
-      
-    }
-    
-    # call the function and store outfile list to variable
-      # these files will be used to mosaic over full extent
-    las_dtm_flist = lasr_dtm_pipeline(
-      files = las_classify_flist
-      # , ofile = paste0(config$temp_dir, "/*_dtm_1m.tif")
-      , res = 1
-      , max_edge = c(0,1)
-      , add_class = 9 # include water in dtm
-    )
-
-    # las_dtm_flist
-    # las_dtm_flist[["rasterize"]] %>% plot()
+    # extract raster from result
+    chm_rast = extract_rast_fn(las_norm_chm_flist)
+    # chm_rast %>% terra::plot()
 
     # fill cells that are missing still with the mean of a window
-      las_dtm_flist[["rasterize"]] = las_dtm_flist[["rasterize"]] %>%
+      chm_rast = chm_rast %>%
         terra::focal(
           w = 3
           , fun = "mean"
@@ -541,17 +742,18 @@ if(
           , na.policy = "only"
         )
     # set crs
-      terra::crs(las_dtm_flist[["rasterize"]]) = proj_crs
-      # las_dtm_flist[["rasterize"]] %>% terra::crs()
-      # las_dtm_flist[["rasterize"]] %>% plot()
+      terra::crs(chm_rast) = proj_crs
+      # chm_rast %>% terra::crs()
+      # chm_rast %>% terra::plot()
+    
     # write to delivery directory
       terra::writeRaster(
-        las_dtm_flist[["rasterize"]]
-        , filename = paste0(config$delivery_dir, "/dtm_1m.tif")
+        chm_rast
+        , filename = chm_file_name
         , overwrite = T
       )
       
-      # paste0(config$delivery_dir, "/dtm_1m.tif") %>% 
+      # chm_file_name %>% 
       #   terra::rast() %>% 
       #   terra::crs()
       #   plot()
@@ -559,3 +761,16 @@ if(
     # clean up
     remove(list = ls()[grep("_temp",ls())])
     gc()
+}else if(file.exists(chm_file_name) == T){
+  chm_rast = terra::rast(chm_file_name)
+}
+
+#################################################################################
+#################################################################################
+# do something
+#################################################################################
+#################################################################################
+
+opt_output_files(ctg) <-  paste0(tempdir(), "/{*}_norm")
+ctg_norm <- normalize_height(ctg, dtm)
+    
