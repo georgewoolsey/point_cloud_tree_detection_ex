@@ -2592,36 +2592,55 @@ comp_tree_tops_temp = tree_tops %>%
   dplyr::select(
     treeID, comp_trees_per_ha, comp_relative_tree_height
   )
+
 ### calculate distance to nearest neighbor
-dist_tree_tops_temp = tree_tops %>% 
-  sf::st_distance(tree_tops, by_element = F) %>% 
-  dplyr::as_tibble() %>% 
-  dplyr::mutate(row_n=dplyr::row_number()) %>% 
-  tidyr::pivot_longer(
-    cols = starts_with("V")
-    , names_to = "comp"
-    , names_prefix = "V"
-    , values_to = "comp_dist_to_nearest_m"
-    , values_drop_na = T
-  ) %>% 
-  dplyr::filter(
-    row_n!=comp
-  ) %>% 
-  dplyr::mutate(comp_dist_to_nearest_m = as.numeric(comp_dist_to_nearest_m)) %>% 
-  dplyr::group_by(row_n) %>% 
-  dplyr::summarise(comp_dist_to_nearest_m = min(comp_dist_to_nearest_m, na.rm = T)) %>% 
-  dplyr::ungroup() %>% 
-  dplyr::arrange(row_n) %>% 
-  dplyr::select(-c(row_n))
+  ### cap distance to nearest tree within xxm buffer
+  dist_buffer_temp = 50
+  # get trees within radius
+  dist_tree_tops_temp = tree_tops %>% 
+    dplyr::select(treeID) %>% 
+    # buffer point
+    sf::st_buffer(dist_buffer_temp) %>% 
+    # spatial join with all tree points
+    sf::st_join(
+      tree_tops %>% 
+        dplyr::select(treeID, tree_x, tree_y) %>% 
+        dplyr::rename(treeID2=treeID)
+    ) %>% 
+    dplyr::filter(treeID != treeID2)
+  
+  # calculate row by row distances 
+  dist_tree_tops_temp = dist_tree_tops_temp %>% 
+    sf::st_centroid() %>% 
+    st_set_geometry("geom1") %>% 
+    dplyr::bind_cols(
+      dist_tree_tops_temp %>% 
+        sf::st_drop_geometry() %>% 
+        dplyr::select("tree_x", "tree_y") %>% 
+        sf::st_as_sf(coords = c("tree_x", "tree_y"), crs = sf::st_crs(tree_tops)) %>% 
+        st_set_geometry("geom2")
+    ) %>% 
+    dplyr::mutate(
+      comp_dist_to_nearest_m = sf::st_distance(geom1, geom2, by_element = T) %>% as.numeric()
+    ) %>% 
+    sf::st_drop_geometry() %>% 
+    dplyr::select(treeID,comp_dist_to_nearest_m) %>% 
+    dplyr::group_by(treeID) %>% 
+    dplyr::summarise(comp_dist_to_nearest_m = min(comp_dist_to_nearest_m, na.rm = T)) %>% 
+    dplyr::ungroup()
 
 ### join with original tree tops data
-tree_tops = tree_tops %>% 
-  dplyr::left_join(
-    comp_tree_tops_temp
-    , by = dplyr::join_by("treeID")
-  ) %>% 
-  # add distance
-  dplyr::bind_cols(dist_tree_tops_temp)
+  tree_tops = tree_tops %>% 
+    dplyr::left_join(
+      comp_tree_tops_temp
+      , by = dplyr::join_by("treeID")
+    ) %>% 
+    # add distance
+    dplyr::left_join(
+      dist_tree_tops_temp
+      , by = dplyr::join_by("treeID")
+    ) %>% 
+    dplyr::mutate(comp_dist_to_nearest_m = dplyr::coalesce(comp_dist_to_nearest_m,dist_buffer_temp))
 
 ### Write the trees to the disk
   sf::st_write(
@@ -2899,6 +2918,12 @@ treemap_rast = treemap_rast %>%
       sf::st_union() %>% 
       terra::vect() %>% 
       terra::project(terra::crs(treemap_rast))
+  ) %>% 
+  terra::mask(
+    las_ctg@data$geometry %>% 
+      sf::st_union() %>% 
+      terra::vect() %>% 
+      terra::project(terra::crs(treemap_rast))
   )
 ### get weights for weighting each tree in the population models
 # treemap id = tm_id for linking to tabular data 
@@ -3091,8 +3116,13 @@ dbh_training_data_temp = crowns_sf_joined_stems_temp %>%
     & stem_dbh_cm <= est_dbh_cm_upper
   ) %>% 
   dplyr::group_by(treeID) %>% 
+  # select the minimum difference to regional dbh estimate
   dplyr::filter(
     est_dbh_pct_diff==min(est_dbh_pct_diff)
+  ) %>% 
+  # just take one if same dbh
+  dplyr::filter(
+    dplyr::row_number()==1
   ) %>% 
   dplyr::ungroup() %>% 
   dplyr::select(c(
@@ -4262,13 +4292,13 @@ crowns_treels_sf_temp = crowns_treels_sf_temp %>%
 
 ### Add crown data summaries
 crown_sum_temp = data.frame(
-    mean_crown_ht_m = terra::extract(x = master_chm, y = terra::vect(crowns_treels_sf_temp), fun = "mean", na.rm = T)
-    , median_crown_ht_m = terra::extract(x = master_chm, y = terra::vect(crowns_treels_sf_temp), fun = "median", na.rm = T)
-    , min_crown_ht_m = terra::extract(x = master_chm, y = terra::vect(crowns_treels_sf_temp), fun = "min", na.rm = T)
+    mean_crown_ht_m = terra::extract(x = chm_rast, y = terra::vect(crowns_sf), fun = "mean", na.rm = T)
+    , median_crown_ht_m = terra::extract(x = chm_rast, y = terra::vect(crowns_sf), fun = "median", na.rm = T)
+    , min_crown_ht_m = terra::extract(x = chm_rast, y = terra::vect(crowns_sf), fun = "min", na.rm = T)
   ) %>% 
   dplyr::select(-c(tidyselect::ends_with(".ID"))) %>% 
-  dplyr::rename_with(~ stringr::str_remove_all(.x,".Z"))
-
+  dplyr::rename_with(~ stringr::str_remove_all(.x,".Z")) %>% 
+  dplyr::rename_with(~ stringr::str_remove_all(.x,".focal_mean"))
 
 ### join crown data summary
 crowns_treels_sf_temp = crowns_treels_sf_temp %>% 

@@ -17,21 +17,30 @@
 #################################################################################
 #################################################################################
   ###____________________###
+  ### this process writes intermediate data to the disk
+  ### keep those intermediate files (classfied, normalized, stem las files)
+  ###____________________###
+  keep_intermediate_files = T
+  
+  ###____________________###
   ### use parallel processing? (T/F) ###
   ### parallel processing may not work on all machines ###
   ###____________________###
-  use_parallel_processing = T
+  use_parallel_processing = F
+  
   ###____________________###
   ### Set directory for outputs ###
   ###____________________###
   # rootdir = "../data"
   rootdir = "../data"
+  
   ###_________________________###
   ### Set input las directory ###
   ###_________________________###
   # !!!!!!!!!! ENSURE FILES ARE PROJECTED IN CRS THAT USES METRE AS MEASURMENT UNIT
   # input_las_dir = "../data/big_las_raw"
   input_las_dir = "../data/small_las_raw"
+  
   ###_________________________###
   ### Set input TreeMap directory ###
   ###_________________________###
@@ -62,6 +71,7 @@
 # Setup
 #################################################################################
 #################################################################################
+  full_start_time = Sys.time()
   # bread-and-butter
   library(tidyverse) # the tidyverse
   library(viridis) # viridis colors
@@ -326,8 +336,13 @@
   # set up lasR read file list
   ###______________________________###
     raw_las_files = list.files(config$las_grid_dir, pattern = ".*\\.(laz|las)$", full.names = T)
+    
     # pull crs for using in write operations
-    proj_crs = las_ctg %>% sf::st_crs() %>% purrr::pluck(1)
+      crs_list_temp = las_ctg@data$CRS
+      if(length(unique(crs_list_temp))>1){stop("the raw las files have multiple CRS settings")}else{
+        proj_crs = paste0("EPSG:",unique(crs_list_temp))
+      }
+      
     #switch to overwrite rasters if new data is created 
       # (leave as F here even if first time executing)
     overwrite_raster = F
@@ -336,7 +351,7 @@
     # check_ls_size_fn(ls())
     remove(
       las_ctg, create_project_structure, create_grid_las_list
-      , lasr_clip_polygon, safe_lasr_clip_polygon
+      , lasr_clip_polygon, safe_lasr_clip_polygon, las_grid
     )
   
 #################################################################################
@@ -613,8 +628,10 @@ if(
   ### define function to normalize files either in parallel or not and call the function
   ### either path results in normalized files written to config$las_normalize_dir
   if(use_parallel_processing == T){
+    # Error in unserialize(socklist[[n]]) : error reading from connection
+      # means that one of the workers died when trying to process...try restarting
     ###______________________________________________________________________________________###
-    ### In parallel, classify ground, and height normalize across the tiles and rewrite them ###
+    ### In parallel height normalize across the tiles and rewrite them ###
     ###______________________________________________________________________________________###
     las_normalize_fn <- function(las_file_dir, out_dir, dtm=NULL) {
     
@@ -623,14 +640,15 @@ if(
       
       # configure parallel
       cores = parallel::detectCores()
-      cluster = parallel::makeCluster(cores)
+      cluster = parallel::makeCluster(cores-1)
       # register the parallel backend with the `foreach` package
       doParallel::registerDoParallel(cluster)
       # pass to foreach to process each lidar file in parallel
         # for (i in 1:length(lidar_list)) {
         foreach::foreach(
           i = 1:length(lidar_list)
-          ,.packages = c("tools","lidR","tidyverse","doParallel")
+          , .packages = c("tools","lidR","tidyverse","doParallel")
+          , .inorder = F
         ) %dopar% {
           
           ### Get the desired lidar tile
@@ -1070,14 +1088,17 @@ if(
   #######################################
   ### call write_stem_las_fn
   #######################################
+    
     if(use_parallel_processing == T){
+      # Error in unserialize(socklist[[n]]) : error reading from connection
+      # means that one of the workers died when trying to process...try restarting
       #######################################
       ### a parallel version is:
       #######################################
         flist_temp = list.files(config$las_normalize_dir, pattern = ".*\\.(laz|las)$", full.names = T)
         # configure parallel
         cores = parallel::detectCores()
-        cluster = parallel::makeCluster(cores)
+        cluster = parallel::makeCluster(cores-1)
         # register the parallel backend with the `foreach` package
         doParallel::registerDoParallel(cluster)
         # pass to foreach to process each lidar file in parallel
@@ -1085,6 +1106,7 @@ if(
             foreach::foreach(
               i = 1:length(flist_temp)
               , .packages = c("tools","lidR","tidyverse","doParallel","TreeLS")
+              , .inorder = F
             ) %dopar% {
               write_stem_las_fn(las_path_name = flist_temp[i], min_tree_height = minimum_tree_height)
             } # end foreach
@@ -1246,6 +1268,7 @@ if(
     
     # str(crowns)
     # plot(crowns, col = (viridis::turbo(2000) %>% sample()))
+    # crowns %>% terra::freq() %>% nrow()
     
   ### Write the crown raster to the disk
     terra::writeRaster(
@@ -1279,6 +1302,7 @@ if(
       , treeID = paste(treeID,round(tree_x, 1),round(tree_y, 1), sep = "_")
     )
   # str(tree_tops)
+    
   ### set buffer around tree to calculate competition metrics
   competition_buffer_temp = 5
   ### how much of the buffered tree area is within the study boundary?
@@ -1337,16 +1361,52 @@ if(
     dplyr::select(
       treeID, comp_trees_per_ha, comp_relative_tree_height
     )
+  
   ### calculate distance to nearest neighbor
-  dist_tree_tops_temp = dplyr::tibble(
-    comp_dist_to_nearest_m = tree_tops %>% 
-      sf::st_distance(
-        tree_tops
-        , by_element = F
-      ) %>%
-      # get minimum by row (margin=1) and remove 0 dist for dist to self
-      apply(MARGIN=1,FUN=function(x){min(ifelse(x==0,NA,x),na.rm = T)})
-  )
+    ### cap distance to nearest tree within xxm buffer
+    dist_buffer_temp = 50
+    # get trees within radius
+    dist_tree_tops_temp = tree_tops %>% 
+      dplyr::select(treeID) %>% 
+      # buffer point
+      sf::st_buffer(dist_buffer_temp) %>% 
+      # spatial join with all tree points
+      sf::st_join(
+        tree_tops %>% 
+          dplyr::select(treeID, tree_x, tree_y) %>% 
+          dplyr::rename(treeID2=treeID)
+      ) %>% 
+      dplyr::filter(treeID != treeID2)
+    
+    # calculate row by row distances 
+    dist_tree_tops_temp = dist_tree_tops_temp %>% 
+      sf::st_centroid() %>% 
+      st_set_geometry("geom1") %>% 
+      dplyr::bind_cols(
+        dist_tree_tops_temp %>% 
+          sf::st_drop_geometry() %>% 
+          dplyr::select("tree_x", "tree_y") %>% 
+          sf::st_as_sf(coords = c("tree_x", "tree_y"), crs = sf::st_crs(tree_tops)) %>% 
+          st_set_geometry("geom2")
+      ) %>% 
+      dplyr::mutate(
+        comp_dist_to_nearest_m = sf::st_distance(geom1, geom2, by_element = T) %>% as.numeric()
+      ) %>% 
+      sf::st_drop_geometry() %>% 
+      dplyr::select(treeID,comp_dist_to_nearest_m) %>% 
+      dplyr::group_by(treeID) %>% 
+      dplyr::summarise(comp_dist_to_nearest_m = min(comp_dist_to_nearest_m, na.rm = T)) %>% 
+      dplyr::ungroup()
+  
+  # dist_tree_tops_temp = dplyr::tibble(
+  #   comp_dist_to_nearest_m = tree_tops %>% 
+  #     sf::st_distance(
+  #       tree_tops
+  #       , by_element = F
+  #     ) %>%
+  #     # get minimum by row (margin=1) and remove 0 dist for dist to self
+  #     apply(MARGIN=1,FUN=function(x){min(ifelse(x==0,NA,x),na.rm = T)})
+  # )
   gc()
 
   ### join with original tree tops data
@@ -1356,7 +1416,11 @@ if(
       , by = dplyr::join_by("treeID")
     ) %>% 
     # add distance
-    dplyr::bind_cols(dist_tree_tops_temp)
+    dplyr::left_join(
+      dist_tree_tops_temp
+      , by = dplyr::join_by("treeID")
+    ) %>% 
+    dplyr::mutate(comp_dist_to_nearest_m = dplyr::coalesce(comp_dist_to_nearest_m,dist_buffer_temp))
   
   ### Write the trees to the disk
     sf::st_write(
@@ -1399,16 +1463,26 @@ if(
   # ggplot(crowns_sf) + geom_sf(aes(fill=as.factor(layer)),color=NA) +
   #   scale_fill_manual(values = viridis::turbo(nrow(crowns_sf)) %>% sample()) +
   #   theme_void() + theme(legend.position = "none")
-  
-  ### Join the crowns with the seeds to append data, remove Nulls
+  # 
+  ### Join the crowns with the tree tops to append data, remove Nulls
   crowns_sf = crowns_sf %>%
     sf::st_join(tree_tops) %>% 
+    dplyr::group_by(layer) %>% 
+    dplyr::mutate(n_trees = dplyr::n()) %>% 
+    dplyr::group_by(treeID) %>% 
+    dplyr::mutate(n_crowns = dplyr::n()) %>% 
+    dplyr::ungroup() %>% 
+    dplyr::filter(
+      n_trees==1 
+      | (n_trees>1 & n_crowns==1) # keeps the treeID that only has one crown if multiple trees to one crown
+    ) %>% 
     dplyr::select(c(
       "treeID", "tree_height_m"
       , "tree_x", "tree_y"
       , "crown_area_m2"
       , tidyselect::starts_with("comp_")
     ))
+  # str(crowns_sf)
   
   ### Add crown data summaries
   crown_sum_temp = data.frame(
@@ -1423,7 +1497,6 @@ if(
   ### join crown data summary
   crowns_sf = crowns_sf %>% 
     dplyr::bind_cols(crown_sum_temp)
-  
   # str(crowns_sf)
   
   ### Write the crowns to the disk
@@ -1485,20 +1558,33 @@ gc()
     # downloaded from: https://www.fs.usda.gov/rds/archive/Catalog/RDS-2021-0074
     # read in treemap (no memory is taken)
     treemap_rast = terra::rast("../data/treemap/TreeMap2016.tif")
-    # filter treemap based on las...rast now in memory
+    
+    ### filter treemap based on las...rast now in memory
     treemap_rast = treemap_rast %>% 
       terra::crop(
         readLAScatalog(config$input_las_dir)@data$geometry %>% 
           sf::st_union() %>% 
           terra::vect() %>% 
           terra::project(terra::crs(treemap_rast))
+      ) %>% 
+      terra::mask(
+        readLAScatalog(config$input_las_dir)@data$geometry %>% 
+          sf::st_union() %>% 
+          terra::vect() %>% 
+          terra::project(terra::crs(treemap_rast))
       )
+    
+    # ggplot(treemap_rast %>% as.data.frame(xy=T) %>% rename(f=3)) +
+    #   geom_tile(aes(x=x,y=y,fill=as.factor(f))) +
+    #   scale_fill_viridis_d(option = "turbo") +
+    #   theme_light() + theme(legend.position = "none")
     
     ### get weights for weighting each tree in the population models
     # treemap id = tm_id for linking to tabular data 
     tm_id_weight_temp = terra::freq(treemap_rast) %>%
       dplyr::select(-layer) %>% 
       dplyr::rename(tm_id = value, tree_weight = count)
+    # str(tm_id_weight_temp)
     
     ### get the TreeMap FIA tree list for only the plots included
     treemap_trees_df = readr::read_csv(
@@ -1534,6 +1620,7 @@ gc()
     ### population model of dbh on height, non-linear
     ### used to filter sfm dbhs
     ###__________________________________________________________###
+      gc()
       # population model with no random effects (i.e. no group-level variation)
       # quadratic model form with Gamma distribution for strictly positive response variable dbh
       # set up prior
@@ -1552,7 +1639,34 @@ gc()
       )
       # plot(mod_nl_pop)
       # summary(mod_nl_pop)
-
+      
+      ## write out model estimates to tabular file
+        #### extract posterior draws to a df
+        brms::as_draws_df(
+            mod_nl_pop
+            , variable = c("^b_", "shape")
+            , regex = TRUE
+          ) %>% 
+          # quick way to get a table of summary statistics and diagnostics
+          posterior::summarize_draws(
+            "mean", "median", "sd"
+            ,  ~quantile(.x, probs = c(
+              0.05, 0.95
+              , 0.025, 0.975
+            ))
+            , "rhat"
+          ) %>% 
+          dplyr::mutate(
+            variable = stringr::str_remove_all(variable, "_Intercept")
+            , formula = summary(mod_nl_pop)$formula %>% 
+                as.character() %>% 
+                .[1]
+          ) %>% 
+        write.csv(
+          paste0(config$delivery_dir, "/regional_dbh_height_model_estimates.csv")
+          , row.names = F
+        )
+      
       ### obtain model predictions over range
       # range of x var to predict
         height_range = dplyr::tibble(
@@ -1598,10 +1712,11 @@ gc()
     #     ) +
     #     theme_light() +
     #     theme(legend.position = "none", plot.title = element_text(size = 9))
-    
+        
     ###__________________________________________________________###
     ### Predict and filter SfM-derived DBH
     ###__________________________________________________________###
+      # str(crowns_sf_joined_stems_temp)
       # attach allometric data to CHM derived trees and canopy data
       crowns_sf_joined_stems_temp = crowns_sf_joined_stems_temp %>% 
         # join with model predictions at 0.1 m height intervals
@@ -1626,6 +1741,7 @@ gc()
         # what is the estimated difference
         # summary(crowns_sf_joined_stems_temp$est_dbh_pct_diff)
         # crowns_sf_joined_stems_temp %>% dplyr::glimpse()
+        # crowns_sf_joined_stems_temp %>% dplyr::filter(!is.na(stem_dbh_cm)) %>% nrow()
       
       ### build training data set by filtering stems
       dbh_training_data_temp = crowns_sf_joined_stems_temp %>%
@@ -1636,15 +1752,21 @@ gc()
           & stem_dbh_cm <= est_dbh_cm_upper
         ) %>% 
         dplyr::group_by(treeID) %>% 
+        # select the minimum difference to regional dbh estimate
         dplyr::filter(
           est_dbh_pct_diff==min(est_dbh_pct_diff)
+        ) %>% 
+        # just take one if same dbh
+        dplyr::filter(
+          dplyr::row_number()==1
         ) %>% 
         dplyr::ungroup() %>% 
         dplyr::select(c(
           treeID # id
           , stem_dbh_cm # y
           # x vars
-          , crown_area_m2, tree_height_m
+          , tree_height_m
+          , crown_area_m2
           , min_crown_ht_m
           , tidyselect::starts_with("comp_")
         ))
@@ -1711,23 +1833,30 @@ gc()
     ###___________________________________________________________________###
     ### Predict missing DBH values for the top down crowns with no DBH ###
     ###___________________________________________________________________###
+        # nrow(dbh_training_data_temp)
+        # nrow(crowns_sf)
       crowns_sf_predict_only_temp = crowns_sf %>%
         sf::st_drop_geometry() %>% 
         dplyr::anti_join(
-          dbh_training_data_temp
+          dbh_training_data_temp %>% 
+            dplyr::select(treeID)
           , by = dplyr::join_by("treeID")
         ) %>% 
         dplyr::select(
           dbh_training_data_temp %>% dplyr::select(-c(stem_dbh_cm)) %>% names()
         )
+      # str(crowns_sf_predict_only_temp)
+      
       # get predicted dbh
       predicted_dbh_cm_temp = predict(
         stem_prediction_model
         , crowns_sf_predict_only_temp %>% dplyr::select(-treeID)
       )
       # summary(predicted_dbh_cm_temp)
+      
       ## combine predicted data with training data for full data set for all tree crowns with a matched tree top
-      crowns_sf_with_dbh = crowns_sf %>% 
+      # nrow(crowns_sf)
+      crowns_sf_with_dbh = crowns_sf %>%
         # join training data
         dplyr::left_join(
           dbh_training_data_temp %>% 
@@ -1756,12 +1885,22 @@ gc()
         dplyr::select(
           !tidyselect::ends_with("_dbh_cm")
         )
-    
+      
+      # nrow(crowns_sf_with_dbh)
+      # nrow(crowns_sf)
+      # nrow(tree_tops)
+      
+    # ggplot(crowns_sf_with_dbh) + 
+    #   geom_sf(aes(fill=dbh_cm), color=NA) +
+    #   scale_fill_viridis_c(option="plasma") +
+    #   coord_sf(expand = F) +
+    #   theme_light()
+      
     ### write the data to the disk
       # crown vector polygons
       sf::st_write(
         crowns_sf_with_dbh
-        , paste0(config$delivery_spatial_dir, "/final_detected_crowns.gpkg")
+        , paste0(config$delivery_dir, "/final_detected_crowns.gpkg")
         , append = FALSE
         , quiet = TRUE
       )
@@ -1771,37 +1910,39 @@ gc()
         crowns_sf_with_dbh %>% 
           sf::st_drop_geometry() %>% 
           sf::st_as_sf(coords = c("tree_x", "tree_y"), crs = sf::st_crs(crowns_sf_with_dbh))
-        , paste0(config$delivery_spatial_dir, "/final_detected_tree_tops.gpkg")
+        , paste0(config$delivery_dir, "/final_detected_tree_tops.gpkg")
         , append = FALSE
         , quiet = TRUE
       )
 
-      # ### plot
-      #   ggplot(
-      #     data = crowns_sf_with_dbh
-      #     , mapping = aes(y=tree_height_m, x = dbh_cm)
-      #   ) +
-      #   geom_smooth(
-      #     method = "loess"
-      #     , span = 1
-      #     , color = "gray44"
-      #   ) +
-      #   geom_point(
-      #     mapping = aes(color = is_training_data)  
-      #     , alpha = 0.6
-      #   ) + 
-      #   labs(
-      #     x = "DBH (cm)"
-      #     , y = "Tree Ht. (m)"
-      #     , color = "Training Data"
-      #     , title = "SfM derived tree height and DBH relationship"
-      #   ) +
-      #   scale_color_manual(values = c("gray", "firebrick")) +
-      #   theme_light() +
-      #   theme(
-      #     legend.position = "bottom"
-      #     , legend.direction = "horizontal"
-      #   )
+      ### plot
+        ggplot(
+          data = crowns_sf_with_dbh
+          , mapping = aes(y=tree_height_m, x = dbh_cm)
+        ) +
+        geom_point(
+          mapping = aes(color = is_training_data)
+          , alpha = 0.6
+          , size = 0.5
+        ) +
+        geom_smooth(
+          method = "loess"
+          , span = 1
+          , color = "gray44"
+          , alpha = 0.7
+        ) +
+        labs(
+          x = "DBH (cm)"
+          , y = "Tree Ht. (m)"
+          , color = "Training Data"
+          , title = "SfM derived tree height and DBH relationship"
+        ) +
+        scale_color_manual(values = c("gray", "firebrick")) +
+        theme_light() +
+        theme(
+          legend.position = "bottom"
+          , legend.direction = "horizontal"
+        )
   
     # clean up
       remove(list = ls()[grep("_temp",ls())])
@@ -1922,22 +2063,56 @@ gc()
     ### export tabular
       write.csv(
           silv_metrics_temp
-          , paste0(config$delivery_spatial_dir, "/final_plot_silv_metrics.csv")
+          , paste0(config$delivery_dir, "/final_plot_silv_metrics.csv")
           , row.names = F
         )
     
-    # ### summary table
-    # silv_metrics_temp %>% 
-    #   sf::st_drop_geometry() %>% 
-    #   dplyr::filter(plotID==silv_metrics_temp$plotID[1]) %>% 
-    #   tidyr::pivot_longer(
-    #     cols = -c(plotID)
-    #     , names_to = "measure"
-    #     , values_to = "value"
-    #   ) %>% 
-    #   kableExtra::kbl(
-    #     caption = "Silvicultural metrics in both metric and imperial units"
-    #     , digits = 2
-    #   ) %>% 
-    #   kableExtra::kable_styling()
+    # this would just be a vector file if available
+      silv_metrics_temp = readLAScatalog(config$input_las_dir)@data$geometry %>%
+        sf::st_union() %>% 
+        sf::st_as_sf() %>% 
+        dplyr::mutate(
+          plotID = "1" # can spatially join to plot vectors if available
+        ) %>% 
+        # join with plot data data
+        dplyr::inner_join(
+          silv_metrics_temp
+          , by = dplyr::join_by("plotID")
+        )
+  
+    ## summary table
+    silv_metrics_temp %>%
+      sf::st_drop_geometry() %>%
+      dplyr::filter(plotID==silv_metrics_temp$plotID[1]) %>%
+      tidyr::pivot_longer(
+        cols = -c(plotID)
+        , names_to = "measure"
+        , values_to = "value"
+      ) %>%
+      kableExtra::kbl(
+        caption = "Silvicultural metrics in both metric and imperial units"
+        , digits = 2
+      ) %>%
+      kableExtra::kable_styling()
 
+#################################################################################
+#################################################################################
+# clean up
+#################################################################################
+#################################################################################
+    # remove temp files
+    if(keep_intermediate_files==F){
+      unlink(config$temp_dir, recursive = T)
+    }
+    # message
+    las_ctg_temp = lidR::readLAScatalog(config$input_las_dir)@data
+    message(
+      "total time was "
+      , round(as.numeric(difftime(Sys.time(), full_start_time, units = c("mins"))),2)
+      , " minutes to process "
+      , scales::comma(sum(las_ctg_temp$Number.of.point.records))
+      , " points over an area of "
+      , scales::comma(as.numeric(las_ctg_temp$geometry %>% sf::st_union() %>% sf::st_area())/10000,accuracy = 0.01)
+      , " hectares"
+    )
+    
