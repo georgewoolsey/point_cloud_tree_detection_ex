@@ -1916,33 +1916,33 @@ gc()
       )
 
       ### plot
-        ggplot(
-          data = crowns_sf_with_dbh
-          , mapping = aes(y=tree_height_m, x = dbh_cm)
-        ) +
-        geom_point(
-          mapping = aes(color = is_training_data)
-          , alpha = 0.6
-          , size = 0.5
-        ) +
-        geom_smooth(
-          method = "loess"
-          , span = 1
-          , color = "gray44"
-          , alpha = 0.7
-        ) +
-        labs(
-          x = "DBH (cm)"
-          , y = "Tree Ht. (m)"
-          , color = "Training Data"
-          , title = "SfM derived tree height and DBH relationship"
-        ) +
-        scale_color_manual(values = c("gray", "firebrick")) +
-        theme_light() +
-        theme(
-          legend.position = "bottom"
-          , legend.direction = "horizontal"
-        )
+        # ggplot(
+        #   data = crowns_sf_with_dbh
+        #   , mapping = aes(y=tree_height_m, x = dbh_cm)
+        # ) +
+        # geom_point(
+        #   mapping = aes(color = is_training_data)
+        #   , alpha = 0.6
+        #   , size = 0.5
+        # ) +
+        # geom_smooth(
+        #   method = "loess"
+        #   , span = 1
+        #   , color = "gray44"
+        #   , alpha = 0.7
+        # ) +
+        # labs(
+        #   x = "DBH (cm)"
+        #   , y = "Tree Ht. (m)"
+        #   , color = "Training Data"
+        #   , title = "SfM derived tree height and DBH relationship"
+        # ) +
+        # scale_color_manual(values = c("gray", "firebrick")) +
+        # theme_light() +
+        # theme(
+        #   legend.position = "bottom"
+        #   , legend.direction = "horizontal"
+        # )
   
     # clean up
       remove(list = ls()[grep("_temp",ls())])
