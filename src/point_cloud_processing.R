@@ -26,7 +26,7 @@
   ### use parallel processing? (T/F) ###
   ### parallel processing may not work on all machines ###
   ###____________________###
-  use_parallel_processing = F
+  use_parallel_processing = T
   
   ###____________________###
   ### Set directory for outputs ###
@@ -38,8 +38,8 @@
   ### Set input las directory ###
   ###_________________________###
   # !!!!!!!!!! ENSURE FILES ARE PROJECTED IN CRS THAT USES METRE AS MEASURMENT UNIT
-  # input_las_dir = "../data/big_las_raw"
-  input_las_dir = "../data/small_las_raw"
+  input_las_dir = "../data/big_las_raw"
+  # input_las_dir = "../data/small_las_raw"
   
   ###_________________________###
   ### Set input TreeMap directory ###
@@ -257,6 +257,10 @@
 # Tile raw las files to work with smaller chunks
 #################################################################################
 #################################################################################
+  # create spatial index files (.lax)
+    create_lax_for_tiles(
+      las_file_list = list.files(config$input_las_dir, pattern = ".*\\.(laz|las)$", full.names = T)
+    )
   ### point to input las files as a lidR LAScatalog (reads the header of all the LAS files of a given folder)
   las_ctg = lidR::readLAScatalog(config$input_las_dir)
   ### Pull the las extent geometry
