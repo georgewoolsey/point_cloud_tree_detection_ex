@@ -3645,7 +3645,7 @@ las_ctg = lidR::readALSLAScatalog("../data/las_raw/")
 treemap_rast = terra::rast("../data/treemap/TreeMap2016.tif")
 # filter treemap based on las
 treemap_rast = treemap_rast %>% 
-  terra::crop(
+  terra::mask(
     las_ctg@data$geometry %>% 
       sf::st_union() %>% 
       terra::vect() %>% 

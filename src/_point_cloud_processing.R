@@ -55,8 +55,8 @@
   ###_________________________###
   ### Set the maximum dbh size (meters)
   ###_________________________###
-  dbh_max_size_m = 1.5
-
+  dbh_max_size_m = 1
+  
 #################################################################################
 #################################################################################
 # Setup
@@ -73,6 +73,7 @@
   library(terra) # raster
   library(sf) # simple features
   library(sfarrow) # sf to Apache-Parquet files for working with large files
+  library(raster) # for ForestTools crown delineation but depreciated 2023-10
   
   # point cloud processing
   library(lidR)
@@ -90,7 +91,7 @@
     # install.packages("BiocManager")
     # library(BiocManager) # required for lidR::watershed
     # BiocManager::install("EBImage")
-    library(EBImage) # required for lidR::watershed
+    # library(EBImage) # required for lidR::watershed
   
   ## !! TreeLS package removed from CRAN...
     ## uncomment to install from github dev repo: https://github.com/tiagodc/TreeLS
@@ -1112,251 +1113,540 @@ if(
   
 #################################################################################
 #################################################################################
-# Combine the Stem Grid Tiles
+# Combine Stem Vector Data to get points with sfm DBH estimates
 #################################################################################
 #################################################################################
+  # Combine the vector data written to the config$stem_poly_tile_dir directory as `parquet` tile files
+  ###__________________________________________________________###
+  ### Merge the stem vector location tiles into a single object ###
+  ###__________________________________________________________###
+  dbh_locations_sf = list.files(config$stem_poly_tile_dir, pattern = ".*\\.parquet$", full.names = T) %>% 
+      purrr::map(sfarrow::st_read_parquet) %>% 
+      dplyr::bind_rows() %>% 
+      sf::st_as_sf() %>% 
+      sf::st_make_valid() %>% 
+      sf::st_set_crs(proj_crs)
 
-In the [prior section](#detect-stems), each normalized grid tile point cloud was individually analyzed with a `TreeLS` package workflow to: i) write a `laz` to the `r config$las_stem_dir` (`config$las_stem_dir`) directory with the `Classification` data updated to: ground points (class 2); water points (class 9); stem points (class 4); non-stem (class 5); and ii) write a `parquet` file with the tree identification stem locations, heights, and DBH estimates.
-
-This section combines these classified grid tile point clouds into a single point cloud that includes stem points only (`Classification == 4`) and a single vector data layer with the stem locations and identifying information.
-
-## Combine Stem Point Clouds
-
-Combine grid tile stem point clouds. This data does not contain tree ID, tree height, or tree DBH estimates. That data resides in the vector data written to the `r config$stem_poly_tile_dir` (`config$stem_poly_tile_dir`) directory as `parquet` tile files created in [this section](#detect-stems). See the example vector data [here](#ex_est_dbh). This vector data is combined in the [next section](#combine_stems_vect).
-
-```{r combine-stems}
-###___________________________________________________###
-### create function to read las and return data frame
-###___________________________________________________###
-  las2df <- function(las_path_name, class_filter_list = as.numeric(NA)) {
-    ### Read in the desired las file
-    las_stem_tile = lidR::readLAS(las_path_name) %>% 
-      lidR::filter_duplicates()
+  ## Clean the Stem Vector Data
+  # The cleaning process uses the following steps:
+  # * remove stems with empty radius estimates from the `TreeLS::tlsInventory` DBH estimation step
+  # * remove stems >= DBH threshold set by the user in the parameter `dbh_max_size_m` (`r dbh_max_size_m`m in this example)
+  # * remove stems with empty or invalid xy coordinates
   
-    # if las classification is null return whole data set
-    if(max(is.na(as.numeric(class_filter_list)))==1){
-      stem_point_df = las_stem_tile@data %>% 
-        # track tile file name
-        dplyr::mutate(las_stem_dir_file = basename(las_path_name))
-    }else{
-      ### Grab the filtered dataframe
-      stem_point_df = las_stem_tile@data %>% 
-        ### Pull the stem only points
-        dplyr::filter(Classification %in% as.numeric(class_filter_list)) %>% 
-        # track tile file name
-        dplyr::mutate(las_stem_dir_file = basename(las_path_name))
-    }
-    # str(stem_point_df)
+  dbh_locations_sf = dbh_locations_sf %>% 
+    dplyr::filter(
+      !is.na(radius_m)
+      & dbh_m <= dbh_max_size_m
+      & sf::st_is_valid(.)
+      & !sf::st_is_empty(.)
+    ) %>% 
+    dplyr::mutate(
+      condition = "detected_stem"
+    )
+
+  ###___________________________________________________________###
+  ### Write the detected DBHs
+  ###___________________________________________________________###
+    sf:::st_write(
+      dbh_locations_sf
+      , dsn = paste0(config$delivery_dir, "/bottom_up_detected_stem_locations.gpkg")
+      , append = FALSE
+      , delete_dsn = TRUE
+      , quiet = TRUE
+    )
     
-    ### Return the dataframe
-    return(stem_point_df)
-  }
-  # ## test function
-  # list.files(config$las_stem_dir, pattern = ".*\\.(laz|las)$", full.names = T) %>%
-  #   .[1:2] %>% 
-  #   purrr::map(las2df, class_filter_list=c(4)) %>% 
-  #   dplyr::bind_rows() %>% 
-  #   dplyr::count(Classification)
+  # clean up
+  remove(list = ls()[grep("_temp",ls())])
+  gc()
 
-###___________________________________________________###
-### Call the function to Merge the stem las point files into a single file ###
-###___________________________________________________###
-  merged_stem_points = list.files(config$las_stem_dir, pattern = ".*\\.(laz|las)$", full.names = T) %>%
-    purrr::map(las2df, class_filter_list=c(4)) %>% 
-    dplyr::bind_rows()
+#################################################################################
+#################################################################################
+# CHM Individual Tree Detection
+#################################################################################
+#################################################################################
+  ###__________________________________________________________###
+  ### Individual tree detection (ITD) 
+  ###__________________________________________________________###
+  # This section utilizes the Canopy Height Model (CHM) raster
 
-  # str(merged_stem_points)
-###___________________________________________________###
-### Points to LAS
-###___________________________________________________###
-  stem_points_las = lidR::LAS(merged_stem_points)
-  st_crs(stem_points_las) = st_crs(las_grid)
-  stem_points_las = lidR::filter_duplicates(stem_points_las)
+  ###_________________________________###
+  ### define the variable window function
+  ###_________________________________###
+  # (with a minimum window size of 2m and a maximum of 5m)
+  # define the variable window function
+    ws_fn = function(x) {
+      y = dplyr::case_when(
+        is.na(x) ~ 1e-3 # requires non-null
+        , x < 0 ~ 1e-3 # requires positive
+        , x < 2 ~ 2 # set lower bound
+        , x > 30 ~ 5  # set upper bound
+        , TRUE ~ 2 + (x * 0.1)
+      )
+      return(y)
+    }
+
+  ###___________________________________________________###
+  ### Individual tree detection using CHM (top down)
+  ###___________________________________________________###
+    ### ITD on CHM
+    # call the locate_trees function and pass the variable window
+    tree_tops = lidR::locate_trees(
+        chm_rast
+        , algorithm = lmf(
+          ws = ws_fn
+          , hmin = minimum_tree_height
+        )
+      )
   
-  # plot(stem_points_las)
+    # # what it is?
+    #   ggplot() + 
+    #     geom_tile(
+    #       data = chm_rast %>% terra::aggregate(3) %>% as.data.frame(xy=T) %>% dplyr::rename(f=3)
+    #       , mapping = aes(x=x,y=y,fill=f)
+    #     ) +
+    #     geom_sf(
+    #       data = tree_tops
+    #       , shape = 20
+    #       , color = "black"
+    #       , size = 0.5
+    #     ) +
+    #     coord_sf(
+    #       expand = FALSE
+    #     ) +
+    #     scale_fill_viridis_c(option = "plasma") +
+    #     labs(fill = "Hgt. (m)", x = "", y = "") +
+    #     theme_light()
+      
+  # clean up
+    remove(list = ls()[grep("_temp",ls())])
+    gc()
+
+#################################################################################
+#################################################################################
+# Delineate Tree Crowns 
+#################################################################################
+#################################################################################
+  # delineate tree crowns raster and vector (i.e. polygon) shapes
+    # this takes way too looonnggggg ..........
+      # crowns = lidR::watershed(
+      #     # input raster layer !! works with stars !! ? not with terra ;[
+      #     chm = chm_rast %>% stars::st_as_stars()
+      #       # terra::subst(from = as.numeric(NA), to = 0)
+      #     # threshold below which a pixel cannot be a tree. Default is 2
+      #     , th_tree = minimum_tree_height
+      #   )() # keep this additional parentheses's so it will work ?lidR::watershed
   
-  ### Write the las file to the disk
-  lidR::writeLAS(stem_points_las, paste0(config$delivery_las_dir,"/detected_stem_points.laz"))
-```
+    # using ForestTools instead ..........
+      # ...which requires the `raster` package which is depreciated
+      crowns = ForestTools::mcws(
+        treetops = sf::st_zm(tree_tops, drop = T) # drops z values
+        , CHM = raster::raster(chm_rast) # converts to raster data ;[
+        , minHeight = minimum_tree_height
+      ) %>% terra::rast()
+    
+    # str(crowns)
+    # plot(crowns, col = (viridis::turbo(2000) %>% sample()))
+    
+  ### Write the crown raster to the disk
+    terra::writeRaster(
+      crowns
+      , paste0(config$delivery_dir, "/top_down_detected_tree_crowns.tif")
+      , overwrite = TRUE
+    )
+  
+  # clean up
+    remove(list = ls()[grep("_temp",ls())])
+    gc()
 
-Plot the combined stems point cloud
+#################################################################################
+#################################################################################
+# Calculate local tree competition metrics for use in modelling
+#################################################################################
+#################################################################################
+  # From [Tinkham et al. (2022)]
+  # Local competition metrics, including: 
+    # the distance to the nearest neighbor
+    # , trees ha^−1^ within a 5 m radius
+    # , and the relative tree height within a 5 m radius
+    
+  ### add tree data to tree_tops
+  tree_tops = tree_tops %>% 
+    # pull out the coordinates and update treeID
+    dplyr::mutate(
+      tree_x = sf::st_coordinates(.)[,1]
+      , tree_y = sf::st_coordinates(.)[,2]
+      , tree_height_m = sf::st_coordinates(.)[,3]
+      , treeID = paste(treeID,round(tree_x, 1),round(tree_y, 1), sep = "_")
+    )
+  # str(tree_tops)
+  ### set buffer around tree to calculate competition metrics
+  competition_buffer_temp = 5
+  ### how much of the buffered tree area is within the study boundary?
+    # use this to scale the TPA estimates below
+  tree_tops_pct_buffer_temp = tree_tops %>% 
+    # buffer point
+    sf::st_buffer(competition_buffer_temp) %>% 
+    dplyr::mutate(
+      point_buffer_area_m2 = as.numeric(sf::st_area(.))
+    ) %>% 
+    # intersect with study bounds
+    sf::st_intersection(
+      readLAScatalog(config$input_las_dir)@data$geometry %>% 
+        sf::st_union() %>% 
+        sf::st_as_sf()
+    ) %>% 
+    # calculate area of buffer within study
+    dplyr::mutate(
+      buffer_area_in_study_m2 = as.numeric(sf::st_area(.))
+    ) %>% 
+    sf::st_drop_geometry() %>% 
+    dplyr::select(treeID, buffer_area_in_study_m2)
+  
+  ### use the tree top location points to get competition metrics
+  comp_tree_tops_temp = tree_tops %>% 
+    # buffer point
+    sf::st_buffer(competition_buffer_temp) %>% 
+    dplyr::select(treeID, tree_height_m) %>% 
+    # spatial join with all tree points
+    sf::st_join(
+      tree_tops %>% 
+        dplyr::select(treeID, tree_height_m) %>% 
+        dplyr::rename_with(
+          .fn = ~ paste0("comp_",.x)
+          , .cols = tidyselect::everything()[
+              -dplyr::any_of(c("geometry"))
+            ]
+        )
+    ) %>%
+    sf::st_drop_geometry() %>% 
+    # calculate metrics by treeID
+    dplyr::group_by(treeID,tree_height_m) %>% 
+    dplyr::summarise(
+      n_trees = dplyr::n()
+      , max_tree_height_m = max(comp_tree_height_m)
+    ) %>% 
+    dplyr::ungroup() %>% 
+    dplyr::inner_join(
+      tree_tops_pct_buffer_temp
+      , by = dplyr::join_by("treeID")
+    ) %>% 
+    dplyr::mutate(
+      comp_trees_per_ha = (n_trees/buffer_area_in_study_m2)*10000
+      , comp_relative_tree_height = tree_height_m/max_tree_height_m*100
+    ) %>% 
+    dplyr::select(
+      treeID, comp_trees_per_ha, comp_relative_tree_height
+    )
+  ### calculate distance to nearest neighbor
+  dist_tree_tops_temp = dplyr::tibble(
+    comp_dist_to_nearest_m = tree_tops %>% 
+      sf::st_distance(
+        tree_tops
+        , by_element = F
+      ) %>%
+      # get minimum by row (margin=1) and remove 0 dist for dist to self
+      apply(MARGIN=1,FUN=function(x){min(ifelse(x==0,NA,x),na.rm = T)})
+  )
+  gc()
 
-```{r plot-combine-stems}
-# structure of the merged_stem_points data
-dplyr::glimpse(merged_stem_points)
-# plot
-plot3D::scatter3D(
-  x = stem_points_las@data$X
-  , y = stem_points_las@data$Y
-  , z = stem_points_las@data$Z
-  , colvar = stem_points_las@data$Z
-  , col = viridis::viridis(50)
-  , pch = 19, cex = 0.3
-)
-```
+  ### join with original tree tops data
+  tree_tops = tree_tops %>% 
+    dplyr::left_join(
+      comp_tree_tops_temp
+      , by = dplyr::join_by("treeID")
+    ) %>% 
+    # add distance
+    dplyr::bind_cols(dist_tree_tops_temp)
+  
+  ### Write the trees to the disk
+    sf::st_write(
+      tree_tops
+      , paste0(config$delivery_dir, "/top_down_detected_tree_tops.gpkg")
+      , quiet = TRUE, append = FALSE
+    )
 
-```{r, warning=FALSE, message=FALSE, echo=FALSE, include=FALSE}
-# remove the data frame
-remove(merged_stem_points)
-remove(stem_points_las)
+  # clean up
+  remove(list = ls()[grep("_temp",ls())])
+  gc()
+
+#################################################################################
+#################################################################################
+# Spatial join the tree tops with the tree crowns
+#################################################################################
+#################################################################################
+  ### Convert crown raster to polygons, then to Sf
+    crowns_sf = crowns %>% 
+      # convert raster to polygons for each individual crown
+      terra::as.polygons() %>% 
+      # fix polygon validity
+      terra::makeValid() %>% 
+      # reduce the number of nodes in geometries
+      terra::simplifyGeom() %>% 
+      # remove holes in polygons
+      terra::fillHoles() %>% 
+      # convert to sf
+      sf::st_as_sf() %>% 
+      # get the crown area
+      dplyr::mutate(
+        crown_area_m2 = as.numeric(sf::st_area(.))
+      ) %>% 
+      #remove super small crowns
+      dplyr::filter(
+        crown_area_m2 > 0.1
+      )
+    
+  # str(crowns_sf)
+  # ggplot(crowns_sf) + geom_sf(aes(fill=as.factor(layer)),color=NA) +
+  #   scale_fill_manual(values = viridis::turbo(nrow(crowns_sf)) %>% sample()) +
+  #   theme_void() + theme(legend.position = "none")
+  
+  ### Join the crowns with the seeds to append data, remove Nulls
+  crowns_sf = crowns_sf %>%
+    sf::st_join(tree_tops) %>% 
+    dplyr::select(c(
+      "treeID", "tree_height_m"
+      , "tree_x", "tree_y"
+      , "crown_area_m2"
+      , tidyselect::starts_with("comp_")
+    ))
+  
+  ### Add crown data summaries
+  crown_sum_temp = data.frame(
+      mean_crown_ht_m = terra::extract(x = chm_rast, y = terra::vect(crowns_sf), fun = "mean", na.rm = T)
+      , median_crown_ht_m = terra::extract(x = chm_rast, y = terra::vect(crowns_sf), fun = "median", na.rm = T)
+      , min_crown_ht_m = terra::extract(x = chm_rast, y = terra::vect(crowns_sf), fun = "min", na.rm = T)
+    ) %>% 
+    dplyr::select(-c(tidyselect::ends_with(".ID"))) %>% 
+    dplyr::rename_with(~ stringr::str_remove_all(.x,".Z")) %>% 
+    dplyr::rename_with(~ stringr::str_remove_all(.x,".focal_mean"))
+  
+  ### join crown data summary
+  crowns_sf = crowns_sf %>% 
+    dplyr::bind_cols(crown_sum_temp)
+  
+  # str(crowns_sf)
+  
+  ### Write the crowns to the disk
+    sf::st_write(
+      crowns_sf
+      , paste0(config$delivery_dir, "/top_down_detected_crowns.gpkg")
+      , quiet = TRUE, append = FALSE
+    )
+  
 remove(list = ls()[grep("_temp",ls())])
 gc()
-```
 
-## Combine Stem Vector Data{#combine_stems_vect}
+#################################################################################
+#################################################################################
+# Model Missing DBH's
+#################################################################################
+#################################################################################
+  # This section uses the sample of DBH values extracted from the point cloud 
+   # in the Detect Stems section to create a model using the SfM extracted height, 
+    # crown area, and competition metrics as independent variables, 
+    # and the SfM-derived DBH as the dependent variable.
 
-Combine the vector data written to the `r config$stem_poly_tile_dir` (`config$stem_poly_tile_dir`) directory as `parquet` tile files created in [this section](#detect-stems). An example of this data is shown [here](#ex_est_dbh). This data contains tree ID, tree height, and tree DBH estimates as well as xy coordinates of the tree stems.
+  ## Join CHM derived Crowns with DBH stems
 
-**If stem vector points spatially overlap ... ???**
+  ###________________________________________________________###
+  ### Join the Top down crowns with the stem location points ###
+  ###________________________________________________________###
+    ### Join the top down crowns with the stem location points
+    ## !! Note that one crown can have multiple stems within its bounds
+    crowns_sf_joined_stems_temp = crowns_sf %>%
+      sf::st_join(
+        dbh_locations_sf %>% 
+          # rename all columns to have "stem" prefix
+          dplyr::rename_with(
+            .fn = ~ paste0("stem_",.x,recycle0 = T)
+            , .cols = tidyselect::everything()[
+              -dplyr::any_of(
+                c(tidyselect::starts_with("stem_x"),"geometry")
+              )
+            ]
+          )
+      )
+    # str(crowns_sf_joined_stems_temp)
+  ###________________________________________________________###
+  ## Filter the SfM DBHs
+  ###________________________________________________________###
 
-```{r combine-stems-vect}
-###__________________________________________________________###
-### Merge the stem vector location tiles into a single object ###
-###__________________________________________________________###
-dbh_locations_sf = list.files(config$stem_poly_tile_dir, pattern = ".*\\.parquet$", full.names = T) %>% 
-    purrr::map(sfarrow::st_read_parquet) %>% 
-    dplyr::bind_rows() %>% 
-    sf::st_as_sf() %>% 
-    sf::st_make_valid() %>% 
-    sf::st_set_crs(sf::st_crs(las_grid))
-```
+    # 1) Predict an expected DBH value for each [CHM derived tree height](#chm_tree_detect) based on the regional model
+    # 2) Remove stem DBH estimates that are outside the 90% prediction bounds
+    # 3) Select the stem DBH estimate that is closest to the predicted DBH value (from 1) if multiple stems are within the bounds of one crown
+    # 4) Use the SfM-detected stems remaining after this filtering workflow as the training data in the local DBH to height allometric relationship model
 
-What is the structure of this vector data?
+    ### Representative FIA Plots and Data
 
-```{r combine-stems-vect-desc1}
-str(dbh_locations_sf)
-```
+    ###__________________________________________________###
+    ### read in FIA data ###
+    ###__________________________________________________###
+    # read in treemap data
+    # downloaded from: https://www.fs.usda.gov/rds/archive/Catalog/RDS-2021-0074
+    # read in treemap (no memory is taken)
+    treemap_rast = terra::rast("../data/treemap/TreeMap2016.tif")
+    # filter treemap based on las now memory
+    treemap_rast = treemap_rast %>% 
+      terra::mask(
+        readLAScatalog(config$input_las_dir)@data$geometry %>% 
+          sf::st_union() %>% 
+          terra::vect() %>% 
+          terra::project(terra::crs(treemap_rast))
+      )
+    
+    ### get weights for weighting each tree in the population models
+    # treemap id = tm_id for linking to tabular data 
+    tm_id_weight_temp = terra::freq(treemap_rast) %>%
+      dplyr::select(-layer) %>% 
+      dplyr::rename(tm_id = value, tree_weight = count)
+    
+    ### get the TreeMap FIA tree list for only the plots included
+    treemap_trees_df = readr::read_csv(
+        "../data/treemap/TreeMap2016_tree_table.csv"
+        , col_select = c(
+          tm_id
+          , TREE
+          , STATUSCD
+          , DIA
+          , HT
+        )
+      ) %>% 
+      dplyr::rename_with(tolower) %>% 
+      dplyr::inner_join(
+        tm_id_weight_temp
+        , by = dplyr::join_by("tm_id")
+      ) %>% 
+      dplyr::filter(
+        # keep live trees only: 1=live;2=dead
+        statuscd == 1
+        & !is.na(dia) 
+        & !is.na(ht) 
+      ) %>%
+      dplyr::mutate(
+        dbh_cm = dia*2.54
+        , tree_height_m = ht/3.28084
+      ) %>% 
+      dplyr::select(-c(statuscd,dia,ht)) %>% 
+      dplyr::rename(tree_id=tree) 
+    
+    ###__________________________________________________________###
+    ### Regional model of DBH as predicted by height 
+    ### population model, height non-linear
+    ###__________________________________________________________###
+      # population model with no random effects (i.e. no group-level variation)
+      # quadratic model form with Gamma distribution for strictly positive response variable dbh
+      # set up prior
+      p_temp <- prior(normal(1, 2), nlpar = "b1") +
+        prior(normal(0, 2), nlpar = "b2")
+      mod_nl_pop = brms::brm(
+        formula = brms::bf(
+          formula = dbh_cm|weights(tree_weight) ~ (b1 * tree_height_m) + tree_height_m^b2
+          , b1 + b2 ~ 1
+          , nl = TRUE # !! specify non-linear
+        )
+        , data = treemap_trees_df
+        , prior = p_temp
+        , family = brms::brmsfamily("Gamma")
+        , iter = 4000
+      )
+      # plot(mod_nl_pop)
+      # summary(mod_nl_pop)
 
-Is a row unique by `treeID` ?
+      ### obtain model predictions over range
+      # range of x var to predict
+        height_range = dplyr::tibble(
+          tree_height_m = seq(
+            from = 0
+            , to = round(max(crowns_sf$tree_height_m)*1.05,0)
+            , by = 0.1 # by 0.1 m increments
+          )
+        )
+      # predict and put estimates in a data frame
+        pred_mod_nl_pop_temp = predict(
+            mod_nl_pop
+            , newdata = height_range
+            , probs = c(.05, .95)
+          ) %>%
+          dplyr::as_tibble() %>%
+          dplyr::rename(
+            lower_b = 3, upper_b = 4
+          ) %>% 
+          dplyr::rename_with(tolower) %>% 
+          dplyr::select(-c(est.error)) %>% 
+          dplyr::bind_cols(height_range)
+        # str(pred_mod_nl_pop_temp)
+        
+    # # plot predictions with data
+    #   ggplot(
+    #     data = pred_mod_nl_pop_temp
+    #     , mapping = aes(x = tree_height_m)
+    #   ) +
+    #     geom_ribbon(
+    #       mapping = aes(ymin = lower_b, ymax = upper_b)
+    #       , fill = "grey88"
+    #     ) +
+    #     geom_line(
+    #       aes(y = estimate)
+    #       , color = "navy"
+    #       , lwd = 1
+    #     ) +
+    #     labs(
+    #       y = "DBH (cm)"
+    #       , x = "Tree Ht. (m)"
+    #       , title = "Regional height to DBH allometry from US Forest Inventory and Analysis (FIA) data"
+    #     ) +
+    #     theme_light() +
+    #     theme(legend.position = "none", plot.title = element_text(size = 9))
+    
+    ###__________________________________________________________###
+    ### Predict and filter SfM-derived DBH
+    ###__________________________________________________________###
+      # attach allometric data to CHM derived trees and canopy data
+      crowns_sf_joined_stems_temp = crowns_sf_joined_stems_temp %>% 
+        # join with model predictions at 0.1 m height intervals
+        dplyr::mutate(
+          tree_height_m_tnth = round(tree_height_m,1) %>% as.character()
+        ) %>% 
+        dplyr::inner_join(
+          pred_mod_nl_pop_temp %>% 
+            dplyr::rename(
+              tree_height_m_tnth=tree_height_m
+              , est_dbh_cm = estimate
+              , est_dbh_cm_lower = lower_b
+              , est_dbh_cm_upper = upper_b
+            ) %>% 
+            dplyr::mutate(tree_height_m_tnth=as.character(tree_height_m_tnth))
+          , by = dplyr::join_by(tree_height_m_tnth)  
+        ) %>% 
+        dplyr::select(-tree_height_m_tnth) %>% 
+        dplyr::mutate(
+          est_dbh_pct_diff = abs(stem_dbh_cm-est_dbh_cm)/est_dbh_cm
+        )
+        # what is the estimated difference
+        # summary(crowns_sf_joined_stems_temp$est_dbh_pct_diff)
+        # crowns_sf_joined_stems_temp %>% dplyr::glimpse()
+      
+      ### build training data set
+      dbh_training_data_temp = crowns_sf_joined_stems_temp %>%
+        sf::st_drop_geometry() %>% 
+        dplyr::filter(
+          !is.na(stem_dbh_cm)
+          & stem_dbh_cm >= est_dbh_cm_lower
+          & stem_dbh_cm <= est_dbh_cm_upper
+        ) %>% 
+        dplyr::group_by(treeID) %>% 
+        dplyr::filter(
+          est_dbh_pct_diff==min(est_dbh_pct_diff)
+        ) %>% 
+        dplyr::ungroup() %>% 
+        dplyr::select(c(
+          treeID # id
+          , stem_dbh_cm # y
+          # x vars
+          , crown_area_m2, tree_height_m
+          , min_crown_ht_m
+          , tidyselect::starts_with("comp_")
+        ))
+      # dbh_training_data_temp %>% dplyr::glimpse()
 
-```{r combine-stems-vect-desc2}
-dbh_locations_sf %>% 
-  sf::st_drop_geometry() %>% 
-  dplyr::ungroup() %>% 
-  dplyr::summarise(
-    n_rows = dplyr::n()
-    , n_unique_treeID = dplyr::n_distinct(treeID)
-  ) %>% 
-  kableExtra::kbl() %>% 
-  kableExtra::kable_styling()
-```
 
-Do stem points overlap spatially?
-
-```{r combine-stems-vect-desc3}
-### plot
-  ggplot(data = dbh_locations_sf %>% dplyr::mutate(random=runif(dplyr::n()))) +
-    geom_sf(
-      mapping = aes(size=dbh_m, fill=as.factor(random))
-      , shape = 21
-      , alpha = 0.6
-    ) + 
-    scale_fill_viridis_d(option="turbo") +
-    theme_light() + 
-    theme(legend.position = "none")
-```
-
-How do the stem points look on satellite imagery?
-
-*Note, in the map layer the `las_grid_buff` box can be checked to view the buffered grid used for processing the grid tiles*
-
-```{r combine-stems-vect-desc4}
-mapview::mapview(
-    las_ctg@data$geometry
-    , color = "black"
-    , lwd = 3, alpha.regions = 0.0, legend = F, label = F
-  ) +
-  mapview::mapview(
-    las_grid_buff
-    , zcol = "grid_id"
-    , col.regions = viridis::cividis(nrow(las_grid_buff))
-    , color = "gray55"
-    , alpha.regions = 0.2, lwd = 2, legend = F, label = F, hide = T
-  ) +
-  mapview::mapview(
-    dbh_locations_sf
-    , zcol = "treeID"
-    , cex = "dbh_m"
-    , legend = F
-    , label = F
-  )
-```
-
-## Clean the Stem Vector Data
-
-<span style="color: red;">Note!: this clean-up process uses code from the original author Neal Swayze with no edits. It does not include any filtering of stems (and associated DBHs) that spatially overlap nor does it have any selection criteria for individual trees that were "cut in half" in one tile but wholly contained in another tile when the grid tiles were combined (i.e. these trees will be included twice with one "good" DBH value and one "bad" DBH).</span>
-
-The cleaning process uses the following steps:
-
-* remove stems with empty radius estimates from the `TreeLS::tlsInventory` DBH estimation step
-* remove stems >= DBH threshold set by the user in the parameter `dbh_max_size_m` (`r dbh_max_size_m`m in this example)
-* remove stems with empty or invalid xy coordinates
-
-This step also creates a vector file of the stems with points sized by the radius (m) estimate of DBH and writes the vector files to the `r config$working_spatial_dir` (`config$working_spatial_dir`) directory.
-
-```{r combine-stems-vect-cln}
-###________________________________________________###
-### CLEAN UP THE STEM POLYGONS WITH SOME FILTERING ###
-###________________________________________________###
-  
-  ### Get the NA condition
-  is_na = is.na(dbh_locations_sf$radius_m)
-  dbh_locations_sf = cbind(dbh_locations_sf, is_na)
-  
-  ### Drop stems with NA values
-  dbh_locations_sf = dbh_locations_sf[dbh_locations_sf$is_na == "FALSE",]
-  dbh_locations_sf = subset(dbh_locations_sf, select = -c(is_na))
-  
-  ### Drop DBHs above set threshold 
-  dbh_locations_sf = dbh_locations_sf[dbh_locations_sf$dbh_m < dbh_max_size_m,]
-  
-  ### Remove empty geometry stem locations
-  condition = sf::st_is_empty(dbh_locations_sf)
-  dbh_locations_sf = cbind(dbh_locations_sf, condition)
-  dbh_locations_sf = dbh_locations_sf[dbh_locations_sf$condition == FALSE,]
-
-###___________________________________________________________###
-### create a variable and buffer the points with the radius ###
-###___________________________________________________________###
-  
-  ### Reset the condition
-  dbh_locations_sf$condition = rep("detected_stem", nrow(dbh_locations_sf))
-
-###___________________________________________________________###
-### Write the DBHs and the merged canopy polygons to the disk ###
-###___________________________________________________________###
-  sf:::st_write(
-    dbh_locations_sf
-    , dsn = paste0(config$delivery_spatial_dir, "/bottom_up_detected_stem_locations.gpkg")
-    , append = FALSE
-    , delete_dsn = TRUE
-    , quiet = TRUE
-  )
-  sf:::st_write(
-    ###K Buffer the points by the radius of the DBH
-    sf::st_buffer(dbh_locations_sf, dist = dbh_locations_sf$radius_m)
-    , dsn = paste0(config$delivery_spatial_dir, "/bottom_up_detected_stem_locations_buffered.gpkg")
-    , append = FALSE
-    , delete_dsn = TRUE
-    , quiet = TRUE
-  )
-```
-
-Result of the cleaning process (compare to same table above)
-
-```{r combine-stems-vect-cln_rslt}
-dbh_locations_sf %>% 
-  sf::st_drop_geometry() %>% 
-  dplyr::ungroup() %>% 
-  dplyr::summarise(
-    n_rows = dplyr::n()
-    , n_unique_treeID = dplyr::n_distinct(treeID)
-  ) %>% 
-  kableExtra::kbl() %>% 
-  kableExtra::kable_styling()
-```
-
-```{r, warning=FALSE, message=FALSE, echo=FALSE, include=FALSE}
-remove(list = ls()[grep("_temp",ls())])
-gc()
-```
