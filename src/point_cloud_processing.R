@@ -20,7 +20,7 @@
   ### this process writes intermediate data to the disk
   ### keep those intermediate files (classfied, normalized, stem las files)
   ###____________________###
-  keep_intermediate_files = T
+  keep_intermediate_files = F
   
   ###____________________###
   ### use parallel processing? (T/F) ###
@@ -122,17 +122,17 @@
   ##########
   # custom
   ##########
-  check_ls_size_fn = function(ls) {
-     ls %>% 
-      purrr::map(function(x){
-        dplyr::tibble(
-          nm = x
-          , size = object.size(get(x))
-        ) 
-      }) %>% 
-      dplyr::bind_rows() %>% 
-      dplyr::arrange(desc(size))  
-  }
+  # check_ls_size_fn = function(ls) {
+  #    ls %>%
+  #     purrr::map(function(x){
+  #       dplyr::tibble(
+  #         nm = x
+  #         , size = object.size(get(x))
+  #       )
+  #     }) %>%
+  #     dplyr::bind_rows() %>%
+  #     dplyr::arrange(desc(size))
+  # }
   # check_ls_size_fn(ls())
   
 #################################################################################
@@ -262,7 +262,17 @@
       las_file_list = list.files(config$input_las_dir, pattern = ".*\\.(laz|las)$", full.names = T)
     )
   ### point to input las files as a lidR LAScatalog (reads the header of all the LAS files of a given folder)
-  las_ctg = lidR::readLAScatalog(config$input_las_dir)
+    las_ctg = lidR::readLAScatalog(config$input_las_dir)
+  
+  ###______________________________###
+  # write las coverage data to delivery
+  ###______________________________###
+    sf::st_write(
+      las_ctg@data
+      , paste0(config$delivery_dir, "/raw_las_ctg_info.gpkg")
+      , quiet = TRUE, append = FALSE
+    )
+  
   ### Pull the las extent geometry
   las_grid = las_ctg@data$geometry %>% 
       sf::st_union() %>% 
