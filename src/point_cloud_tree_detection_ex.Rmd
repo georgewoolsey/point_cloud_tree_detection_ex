@@ -4292,13 +4292,13 @@ crowns_treels_sf_temp = crowns_treels_sf_temp %>%
 
 ### Add crown data summaries
 crown_sum_temp = data.frame(
-    mean_crown_ht_m = terra::extract(x = chm_rast, y = terra::vect(crowns_sf), fun = "mean", na.rm = T)
-    , median_crown_ht_m = terra::extract(x = chm_rast, y = terra::vect(crowns_sf), fun = "median", na.rm = T)
-    , min_crown_ht_m = terra::extract(x = chm_rast, y = terra::vect(crowns_sf), fun = "min", na.rm = T)
+    mean_crown_ht_m = terra::extract(x = master_chm, y = terra::vect(crowns_treels_sf_temp), fun = "mean", na.rm = T)
+    , median_crown_ht_m = terra::extract(x = master_chm, y = terra::vect(crowns_treels_sf_temp), fun = "median", na.rm = T)
+    , min_crown_ht_m = terra::extract(x = master_chm, y = terra::vect(crowns_treels_sf_temp), fun = "min", na.rm = T)
   ) %>% 
   dplyr::select(-c(tidyselect::ends_with(".ID"))) %>% 
-  dplyr::rename_with(~ stringr::str_remove_all(.x,".Z")) %>% 
-  dplyr::rename_with(~ stringr::str_remove_all(.x,".focal_mean"))
+  dplyr::rename_with(~ stringr::str_remove_all(.x,".Z"))
+
 
 ### join crown data summary
 crowns_treels_sf_temp = crowns_treels_sf_temp %>% 
@@ -4343,7 +4343,7 @@ remove(list = ls()[grep("_temp",ls())])
 gc()
 ```
 
-# Colorize the Point Cloud (example)
+## Colorize the Point Cloud (example)
 
 <span style="color: red;"><b>This section includes an example workflow only and is not completed for the full data extent.</b></span>
 
