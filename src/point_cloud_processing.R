@@ -83,11 +83,10 @@
   library(terra) # raster
   library(sf) # simple features
   library(sfarrow) # sf to Apache-Parquet files for working with large files
-  library(raster) # for ForestTools crown delineation but depreciated 2023-10
   
   # point cloud processing
   library(lidR)
-  library(ForestTools) # for crown delineation but relies on depreciated `raster`
+  library(ForestTools) # for crown delineation
   library(rlas) # write las index files .lax
   
   ## !! lasR package not available on CRN
@@ -1273,12 +1272,11 @@ if(
       #   )() # keep this additional parentheses's so it will work ?lidR::watershed
   
     # using ForestTools instead ..........
-      # ...which requires the `raster` package which is depreciated
       crowns = ForestTools::mcws(
         treetops = sf::st_zm(tree_tops, drop = T) # drops z values
-        , CHM = raster::raster(chm_rast) # converts to raster data ;[
+        , CHM = chm_rast
         , minHeight = minimum_tree_height
-      ) %>% terra::rast()
+      )
     
     # str(crowns)
     # plot(crowns, col = (viridis::turbo(2000) %>% sample()))

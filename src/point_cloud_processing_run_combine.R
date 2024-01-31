@@ -50,10 +50,9 @@ library(scales) # work with number and plot scales
 # spatial analysis
 library(terra) # raster
 library(sf) # simple features
-library(raster) # for ForestTools crown delineation but depreciated 2023-10
 # point cloud processing
 library(lidR)
-library(ForestTools) # for crown delineation but relies on depreciated `raster`
+library(ForestTools) # for crown delineation
 # modeling
 library(randomForest)
 library(RCSF) # for the cloth simulation filter (csf) to classify points
@@ -242,12 +241,11 @@ library(brms) # bayesian modelling using STAN engine
       #   )() # keep this additional parentheses's so it will work ?lidR::watershed
   
     # using ForestTools instead ..........
-      # ...which requires the `raster` package which is depreciated
       crowns = ForestTools::mcws(
         treetops = sf::st_zm(tree_tops, drop = T) # drops z values
-        , CHM = raster::raster(chm_rast) # converts to raster data ;[
+        , CHM = chm_rast
         , minHeight = minimum_tree_height
-      ) %>% terra::rast()
+      )
     
     # str(crowns)
     # plot(crowns, col = (viridis::turbo(2000) %>% sample()))

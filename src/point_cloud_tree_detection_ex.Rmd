@@ -91,8 +91,7 @@ library(sfarrow) # sf to Apache-Parquet files for working with large files
 
 # point cloud processing
 library(lidR)
-library(ForestTools) # for crown delineation but relies on depreciated `raster`
-library(raster) # !! this was depreciated in 2023, used for ForestTools
+library(ForestTools) # for crown delineation
 library(rlas) # write las index files .lax
 ## lidR::watershed requires EBImage::watershed 
   # install.packages("BiocManager")
@@ -2468,15 +2467,15 @@ plot(crowns, col = (viridis::turbo(2000) %>% sample()))
 
 <span style="color: red;">G. Woolsey notes: the `lidR::watershed` call above fails because the input CHM created in [this section](#chm_tree_detect) requires no empty raster cells. Obtaining a CHM raster with unempty cells can be accomplished using the interpolation and mosaic methods discussed in that section. Alternatively, the `lidR::segment_trees` function can be utilized with a point cloud covering the full study extent which requires a complete (non-tiled) point cloud (perhaps using the `laz` file created based off of the CHM raster and written to the disk `r config$delivery_las_dir` directory).</span>
 
-Instead, the `ForestTools::mcws` marker-controlled watershed segmentation algorithm is used below and requires input of individual tree top points and a CHM raster. However, this package relies on the `raster` package which was depreciated in 2023. [Tinkham et al. (2022)]((https://scholar.google.com/scholar?cluster=14807895789640069059&hl=en&as_sdt=0,6)) used this same `ForestTools::mcws` algorithm to delineate tree crowns.
+Instead, the `ForestTools::mcws` marker-controlled watershed segmentation algorithm is used below and requires input of individual tree top points and a CHM raster. [Tinkham et al. (2022)]((https://scholar.google.com/scholar?cluster=14807895789640069059&hl=en&as_sdt=0,6)) used this same `ForestTools::mcws` algorithm to delineate tree crowns.
 
 ```{r crown-delin}
 # this requires the `raster` package which is depreciated
 crowns = ForestTools::mcws(
   treetops = sf::st_zm(tree_tops, drop = T) # drops z values
-  , CHM = raster::raster(master_chm) # converts to raster data
+  , CHM = chm_rast 
   , minHeight = minimum_tree_height
-) %>% terra::rast()
+)
 
 # str(crowns)
 # plot(crowns, col = (viridis::turbo(2000) %>% sample()))
@@ -4207,9 +4206,9 @@ Instead, this section uses the stems detected using the `TreeLS` [workflow in th
       dplyr::rename(Z=tree_height_m) %>% 
       dplyr::select(treeID, Z) %>% 
       sf::st_zm(drop = T) # drops z values
-    , CHM = raster::raster(master_chm) # converts to raster data
+    , CHM = master_chm
     , minHeight = minimum_tree_height
-  ) %>% terra::rast()
+  )
 
 
 ### Write the crown raster to the disk
