@@ -2828,7 +2828,7 @@ Spatially join the tree crown polygons created based off of the CHM in [this sec
           .fn = ~ paste0("stem_",.x,recycle0 = T)
           , .cols = tidyselect::everything()[
             -dplyr::any_of(
-              c(tidyselect::starts_with("stem_x"),"geometry")
+              c(tidyselect::starts_with("stem_"),"stem_x", "stem_y","geom","geometry")
             )
           ]
         )

@@ -1548,7 +1548,7 @@ gc()
             .fn = ~ paste0("stem_",.x,recycle0 = T)
             , .cols = tidyselect::everything()[
               -dplyr::any_of(
-                c(tidyselect::starts_with("stem_x"),"geometry")
+                c(tidyselect::starts_with("stem_"),"stem_x", "stem_y","geom","geometry")
               )
             ]
           )
@@ -1898,7 +1898,23 @@ gc()
         ) %>% 
         dplyr::select(
           !tidyselect::ends_with("_dbh_cm")
-        )
+        ) %>% 
+        # join with regional model predictions at 0.1 m height intervals
+        dplyr::mutate(
+          tree_height_m_tnth = round(tree_height_m,1) %>% as.character()
+        ) %>% 
+        dplyr::inner_join(
+          pred_mod_nl_pop_temp %>% 
+            dplyr::rename(
+              tree_height_m_tnth=tree_height_m
+              , reg_est_dbh_cm = estimate
+              , reg_est_dbh_cm_lower = lower_b
+              , reg_est_dbh_cm_upper = upper_b
+            ) %>% 
+            dplyr::mutate(tree_height_m_tnth=as.character(tree_height_m_tnth))
+          , by = dplyr::join_by(tree_height_m_tnth)  
+        ) %>% 
+        dplyr::select(-tree_height_m_tnth)
       
       # nrow(crowns_sf_with_dbh)
       # nrow(crowns_sf)

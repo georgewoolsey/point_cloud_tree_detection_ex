@@ -3,7 +3,7 @@ gc()
 
 # setup
 setwd("c:/Data/usfs/point_cloud_tree_detection_ex/data/")
-delivery_dir = paste0(getwd(),"/point_cloud_processing_BHEF_202306_Units5to8")
+delivery_dir = paste0(getwd(),"/point_cloud_processing_BHEF_202306_combined")
 # list.files(delivery_dir)
 
 # library
@@ -21,14 +21,21 @@ library(mapview) # interactive html maps
 # devtools::install_github("stadiamaps/ggmap")
 library(ggmap)
 
+# option to put satellite imagery as base layer
+  mapview::mapviewOptions(
+    homebutton = FALSE
+    , basemaps = c("Esri.WorldImagery","OpenStreetMap")
+  )
+
 # read data
-dtm_rast = terra::rast(paste0(delivery_dir, "/dtm_1m.tif"))
+# dtm_rast = terra::rast(paste0(delivery_dir, "/dtm_1m.tif"))
 chm_rast = terra::rast(paste0(delivery_dir, "/chm_0.25m.tif"))
 dbh_locations_sf = sf::st_read(paste0(delivery_dir, "/bottom_up_detected_stem_locations.gpkg"))
 crowns = terra::rast(paste0(delivery_dir, "/top_down_detected_tree_crowns.tif"))
 crowns_sf_with_dbh = sf::st_read(paste0(delivery_dir, "/final_detected_crowns.gpkg"))
 treetops_sf_with_dbh = sf::st_read(paste0(delivery_dir, "/final_detected_tree_tops.gpkg"))
 silv_metrics_temp = readr::read_csv(paste0(delivery_dir, "/final_plot_silv_metrics.csv"))
+las_ctg_dta = sf::st_read(paste0(delivery_dir, "/raw_las_ctg_info.gpkg"))
 
 ##################################################################################
 ##################################################################################
@@ -120,11 +127,6 @@ silv_metrics_temp = readr::read_csv(paste0(delivery_dir, "/final_plot_silv_metri
 # chm on html mapview
 ##################################################################################
 ##################################################################################
-  # option to put satellite imagery as base layer
-  mapview::mapviewOptions(
-    homebutton = FALSE
-    , basemaps = c("Esri.WorldImagery","OpenStreetMap")
-  )
   # aggregate raster and map
   chm_rast %>%
     terra::aggregate(fact=4) %>% 
@@ -177,7 +179,9 @@ silv_metrics_temp = readr::read_csv(paste0(delivery_dir, "/final_plot_silv_metri
     , units = "in"
     , dpi = "print"
   )
-
+# clean up
+  gc()
+  remove(list = ls()[grep("_temp",ls())])
 ##################################################################################
 ##################################################################################
 # try some ggmap !!!!! not working rn
