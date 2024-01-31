@@ -2692,6 +2692,7 @@ crowns_sf = crowns %>%
   terra::fillHoles() %>% 
   # convert to sf
   sf::st_as_sf() %>% 
+  dplyr::rename(layer = 1) %>% 
   # get the crown area
   dplyr::mutate(
     crown_area_m2 = as.numeric(sf::st_area(.))
@@ -2706,15 +2707,24 @@ crowns_sf = crowns %>%
   #   scale_fill_manual(values = viridis::turbo(nrow(crowns_sf)) %>% sample()) +
   #   theme_void() + theme(legend.position = "none")
   
-### Join the crowns with the seeds to append data, remove Nulls
-crowns_sf = crowns_sf %>%
-  sf::st_join(tree_tops) %>% 
-  dplyr::select(c(
-    "treeID", "tree_height_m"
-    , "tree_x", "tree_y"
-    , "crown_area_m2"
-    , tidyselect::starts_with("comp_")
-  ))
+### Join the crowns with the tree tops to append data, remove Nulls
+  crowns_sf = crowns_sf %>%
+    sf::st_join(tree_tops) %>% 
+    dplyr::group_by(layer) %>% 
+    dplyr::mutate(n_trees = dplyr::n()) %>% 
+    dplyr::group_by(treeID) %>% 
+    dplyr::mutate(n_crowns = dplyr::n()) %>% 
+    dplyr::ungroup() %>% 
+    dplyr::filter(
+      n_trees==1 
+      | (n_trees>1 & n_crowns==1) # keeps the treeID that only has one crown if multiple trees to one crown
+    ) %>% 
+    dplyr::select(c(
+      "treeID", "tree_height_m"
+      , "tree_x", "tree_y"
+      , "crown_area_m2"
+      , tidyselect::starts_with("comp_")
+    ))
   
   # str(crowns_sf)
   # crowns_sf %>% dplyr::count(treeID) %>% nrow()

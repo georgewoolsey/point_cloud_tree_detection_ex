@@ -1462,6 +1462,7 @@ if(
       terra::fillHoles() %>% 
       # convert to sf
       sf::st_as_sf() %>% 
+      dplyr::rename(layer = 1) %>% 
       # get the crown area
       dplyr::mutate(
         crown_area_m2 = as.numeric(sf::st_area(.))
