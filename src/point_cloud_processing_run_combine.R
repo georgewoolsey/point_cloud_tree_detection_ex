@@ -5,6 +5,7 @@
 #  1) "chm_rast_{xx}m.tif"
 #  2) and dbh_locations_sf "/bottom_up_detected_stem_locations.gpkg"
 #  3) and raw_las_ctg_info.gpkg
+#  4) and dtm_rast_1m.tif
 ##################################################################################
 ##################################################################################
 remove(list = ls()[])
@@ -58,6 +59,43 @@ library(randomForest)
 library(RCSF) # for the cloth simulation filter (csf) to classify points
 library(brms) # bayesian modelling using STAN engine
 
+##################################################################################
+##################################################################################
+# combine dtm rasters by taking the mean dtm height
+##################################################################################
+##################################################################################
+  # read list of dtms
+  dtm_list_temp = list.dirs(getwd(), recursive = F) %>% 
+    stringr::str_subset(dir_matches) %>% 
+    purrr::map(function(x){
+      # does file exist?
+      if(
+        length(list.files(x, pattern = "dtm_1m.tif")) == 1
+      ){
+        terra::rast(paste0(x,"/dtm_1m.tif"))
+      }else{NULL}
+    })
+    # plot(dtm_list_temp[[1]] %>% terra::aggregate(6))
+
+  # mosiac 
+  dtm_rast = do.call(
+    terra::mosaic
+    , c(dtm_list_temp, fun = "mean")
+  )
+  # plot(dtm_rast %>% terra::aggregate(6))
+  
+  # write
+  terra::writeRaster(
+    dtm_rast
+    , paste0(delivery_dir, "/dtm_1m.tif")
+    , overwrite = TRUE
+  )
+  
+  # clean up
+    remove(list = ls()[grep("_temp",ls())])
+    gc()
+    remove(dtm_rast)
+    
 ##################################################################################
 ##################################################################################
 # combine chm rasters by taking the maximum chm height
