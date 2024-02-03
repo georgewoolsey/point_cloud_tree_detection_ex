@@ -573,7 +573,7 @@ gc()
     # read in treemap data
     # downloaded from: https://www.fs.usda.gov/rds/archive/Catalog/RDS-2021-0074
     # read in treemap (no memory is taken)
-    treemap_rast = terra::rast("../data/treemap/TreeMap2016.tif")
+    treemap_rast = terra::rast(paste0(input_treemap_dir, "/TreeMap2016.tif"))
     
     ### filter treemap based on las...rast now in memory
     treemap_rast = treemap_rast %>% 
@@ -602,7 +602,7 @@ gc()
     
     ### get the TreeMap FIA tree list for only the plots included
     treemap_trees_df = readr::read_csv(
-        "../data/treemap/TreeMap2016_tree_table.csv"
+        paste0(input_treemap_dir, "/TreeMap2016_tree_table.csv")
         , col_select = c(
           tm_id
           , TREE
