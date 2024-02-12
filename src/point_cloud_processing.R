@@ -1,3 +1,8 @@
+## !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! ##
+# must first download "RDS-2021-0074_Data.zip" at: https://doi.org/10.2737/RDS-2021-0074
+# point input_treemap_dir parameter to directory that contains "TreeMap2016.tif" and "TreeMap2016_tree_table.csv"
+## !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! ##
+
 #################################################################################
 #################################################################################
 # Input: raw las/laz point cloud file(s) located in user-specified directory
@@ -1596,14 +1601,16 @@ gc()
     # treemap id = tm_id for linking to tabular data 
     tm_id_weight_temp = terra::freq(treemap_rast) %>%
       dplyr::select(-layer) %>% 
-      dplyr::rename(tm_id = value, tree_weight = count)
+      dplyr::rename(tm_id = value, tree_weight = count) %>% 
+      dplyr::mutate(tm_id = as.character(tm_id))
     # str(tm_id_weight_temp)
-    
+
     ### get the TreeMap FIA tree list for only the plots included
     treemap_trees_df = readr::read_csv(
-        paste0(input_treemap_dir, "/TreeMap2016_tree_table.csv"))
+        paste0(input_treemap_dir, "/TreeMap2016_tree_table.csv")
         , col_select = c(
           tm_id
+          , CN
           , TREE
           , STATUSCD
           , DIA
@@ -1611,22 +1618,33 @@ gc()
         )
       ) %>% 
       dplyr::rename_with(tolower) %>% 
-      dplyr::inner_join(
+      dplyr::mutate(
+        cn = as.character(cn)
+        , tm_id = as.character(tm_id)
+      ) %>% 
+      dplyr::left_join(
         tm_id_weight_temp
         , by = dplyr::join_by("tm_id")
       ) %>% 
+      dplyr::left_join(
+        tm_id_weight_temp %>% dplyr::rename(cn = tm_id)
+        , by = dplyr::join_by("cn")
+      ) %>% 
+      dplyr::mutate(tree_weight = dplyr::coalesce(tree_weight.x, tree_weight.y)) %>% 
+      dplyr::select(-c(tree_weight.x, tree_weight.y)) %>% 
       dplyr::filter(
         # keep live trees only: 1=live;2=dead
         statuscd == 1
         & !is.na(dia) 
         & !is.na(ht) 
+        & !is.na(tree_weight)
       ) %>%
       dplyr::mutate(
         dbh_cm = dia*2.54
         , tree_height_m = ht/3.28084
       ) %>% 
       dplyr::select(-c(statuscd,dia,ht)) %>% 
-      dplyr::rename(tree_id=tree) 
+      dplyr::rename(tree_id=tree)  
 
     ###__________________________________________________________###
     ### Regional model of DBH as predicted by height 
