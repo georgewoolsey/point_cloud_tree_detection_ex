@@ -9,13 +9,13 @@
 ## .... during the normalize step, suggests corrupted las file
 ## POTENTIAL FIX IS:
 ## !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! ##
-  # las = rlas::read.las("c:/Users/gwoolsey/Downloads/lad_las/pre_RGB_clipped.las")
+  # las = rlas::read.las("c:/data/pre_RGB_clipped.las")
   # str(las)
   # las$gpstime = 0
   # las$NIR = NULL
   # str(las)
   # rlas::write.las(
-  #   file = "c:/Users/gwoolsey/Downloads/lad_las/pre_RGB_clipped_FIXED.las"
+  #   file = "c:/data/pre_RGB_clipped_FIXED.las"
   #   , header = rlas::header_create(las)
   #   , data = las
   # )
@@ -62,12 +62,13 @@
   ### Set input las directory ###
   ###_________________________###
   # !!!!!!!!!! ENSURE FILES ARE PROJECTED IN CRS THAT USES METRE AS MEASURMENT UNIT
-  input_las_dir = "../data/las_raw"
   # input_las_dir = "../data/small_las_raw"
+  input_las_dir = "../data/las_raw"
   
   ###_________________________###
   ### Set input TreeMap directory ###
   ###_________________________###
+  # input_treemap_dir = "../data/treemap"
   input_treemap_dir = "../data/treemap"
   
   ###_________________________###
@@ -1201,41 +1202,44 @@ if(
   ###__________________________________________________________###
   ### Merge the stem vector location tiles into a single object ###
   ###__________________________________________________________###
-  dbh_locations_sf = list.files(config$stem_poly_tile_dir, pattern = ".*\\.parquet$", full.names = T) %>% 
-      purrr::map(sfarrow::st_read_parquet) %>% 
-      dplyr::bind_rows() %>% 
-      sf::st_as_sf() %>% 
-      sf::st_make_valid() %>% 
-      sf::st_set_crs(proj_crs)
-
-  ## Clean the Stem Vector Data
-  # The cleaning process uses the following steps:
-  # * remove stems with empty radius estimates from the `TreeLS::tlsInventory` DBH estimation step
-  # * remove stems >= DBH threshold set by the user in the parameter `dbh_max_size_m` (`r dbh_max_size_m`m in this example)
-  # * remove stems with empty or invalid xy coordinates
+  if(
+    length(list.files(config$stem_poly_tile_dir, pattern = ".*\\.parquet$", full.names = T)) > 0
+  ){
+    dbh_locations_sf = list.files(config$stem_poly_tile_dir, pattern = ".*\\.parquet$", full.names = T) %>% 
+        purrr::map(sfarrow::st_read_parquet) %>% 
+        dplyr::bind_rows() %>% 
+        sf::st_as_sf() %>% 
+        sf::st_make_valid() %>% 
+        sf::st_set_crs(proj_crs)
   
-  dbh_locations_sf = dbh_locations_sf %>% 
-    dplyr::filter(
-      !is.na(radius_m)
-      & dbh_m <= dbh_max_size_m
-      & sf::st_is_valid(.)
-      & !sf::st_is_empty(.)
-    ) %>% 
-    dplyr::mutate(
-      condition = "detected_stem"
-    )
-
-  ###___________________________________________________________###
-  ### Write the detected DBHs
-  ###___________________________________________________________###
-    sf:::st_write(
-      dbh_locations_sf
-      , dsn = paste0(config$delivery_dir, "/bottom_up_detected_stem_locations.gpkg")
-      , append = FALSE
-      , delete_dsn = TRUE
-      , quiet = TRUE
-    )
+    ## Clean the Stem Vector Data
+    # The cleaning process uses the following steps:
+    # * remove stems with empty radius estimates from the `TreeLS::tlsInventory` DBH estimation step
+    # * remove stems >= DBH threshold set by the user in the parameter `dbh_max_size_m` (`r dbh_max_size_m`m in this example)
+    # * remove stems with empty or invalid xy coordinates
     
+    dbh_locations_sf = dbh_locations_sf %>% 
+      dplyr::filter(
+        !is.na(radius_m)
+        & dbh_m <= dbh_max_size_m
+        & sf::st_is_valid(.)
+        & !sf::st_is_empty(.)
+      ) %>% 
+      dplyr::mutate(
+        condition = "detected_stem"
+      )
+  
+    ###___________________________________________________________###
+    ### Write the detected DBHs
+    ###___________________________________________________________###
+      sf:::st_write(
+        dbh_locations_sf
+        , dsn = paste0(config$delivery_dir, "/bottom_up_detected_stem_locations.gpkg")
+        , append = FALSE
+        , delete_dsn = TRUE
+        , quiet = TRUE
+      )
+  }else{dbh_locations_sf = NA}
   # clean up
   remove(list = ls()[grep("_temp",ls())])
   gc()
@@ -1585,19 +1589,23 @@ gc()
   ###________________________________________________________###
     ### Join the top down crowns with the stem location points
     ## !! Note that one crown can have multiple stems within its bounds
-    crowns_sf_joined_stems_temp = crowns_sf %>%
-      sf::st_join(
-        dbh_locations_sf %>% 
-          # rename all columns to have "stem" prefix
-          dplyr::rename_with(
-            .fn = ~ paste0("stem_",.x,recycle0 = T)
-            , .cols = tidyselect::everything()[
-              -dplyr::any_of(
-                c(tidyselect::starts_with("stem_"),"stem_x", "stem_y","geom","geometry")
-              )
-            ]
-          )
-      )
+    if(dplyr::coalesce(nrow(dbh_locations_sf),0)>0){
+      crowns_sf_joined_stems_temp = crowns_sf %>%
+        sf::st_join(
+          dbh_locations_sf %>% 
+            # rename all columns to have "stem" prefix
+            dplyr::rename_with(
+              .fn = ~ paste0("stem_",.x,recycle0 = T)
+              , .cols = tidyselect::everything()[
+                -dplyr::any_of(
+                  c(tidyselect::starts_with("stem_"),"stem_x", "stem_y","geom","geometry")
+                )
+              ]
+            )
+        )
+    }else{
+      crowns_sf_joined_stems_temp = crowns_sf %>% dplyr::mutate(stem_dbh_cm = as.numeric(NA))
+    }
     # str(crowns_sf_joined_stems_temp)
   ###________________________________________________________###
   ## Filter the SfM DBHs
@@ -1692,99 +1700,92 @@ gc()
     ### population model of dbh on height, non-linear
     ### used to filter sfm dbhs
     ###__________________________________________________________###
-      gc()
-      # population model with no random effects (i.e. no group-level variation)
-      # quadratic model form with Gamma distribution for strictly positive response variable dbh
-      # set up prior
-      p_temp <- prior(normal(1, 2), nlpar = "b1") +
-        prior(normal(0, 2), nlpar = "b2")
-      mod_nl_pop = brms::brm(
-        formula = brms::bf(
-          formula = dbh_cm|weights(tree_weight) ~ (b1 * tree_height_m) + tree_height_m^b2
-          , b1 + b2 ~ 1
-          , nl = TRUE # !! specify non-linear
-        )
-        , data = treemap_trees_df
-        , prior = p_temp
-        , family = brms::brmsfamily("Gamma")
-        , iter = 4000
+    gc()
+    # population model with no random effects (i.e. no group-level variation)
+    # quadratic model form with Gamma distribution for strictly positive response variable dbh
+    # set up prior
+    p_temp <- prior(normal(1, 2), nlpar = "b1") +
+      prior(normal(0, 2), nlpar = "b2")
+    mod_nl_pop = brms::brm(
+      formula = brms::bf(
+        formula = dbh_cm|weights(tree_weight) ~ (b1 * tree_height_m) + tree_height_m^b2
+        , b1 + b2 ~ 1
+        , nl = TRUE # !! specify non-linear
       )
-      # plot(mod_nl_pop)
-      # summary(mod_nl_pop)
-      
-      ## write out model estimates to tabular file
-        #### extract posterior draws to a df
-        brms::as_draws_df(
-            mod_nl_pop
-            , variable = c("^b_", "shape")
-            , regex = TRUE
-          ) %>% 
-          # quick way to get a table of summary statistics and diagnostics
-          posterior::summarize_draws(
-            "mean", "median", "sd"
-            ,  ~quantile(.x, probs = c(
-              0.05, 0.95
-              , 0.025, 0.975
-            ))
-            , "rhat"
-          ) %>% 
-          dplyr::mutate(
-            variable = stringr::str_remove_all(variable, "_Intercept")
-            , formula = summary(mod_nl_pop)$formula %>% 
-                as.character() %>% 
-                .[1]
-          ) %>% 
-        write.csv(
-          paste0(config$delivery_dir, "/regional_dbh_height_model_estimates.csv")
-          , row.names = F
-        )
-      
-      ### obtain model predictions over range
-      # range of x var to predict
-        height_range = dplyr::tibble(
-          tree_height_m = seq(
-            from = 0
-            , to = round(max(crowns_sf$tree_height_m)*1.05,0)
-            , by = 0.1 # by 0.1 m increments
-          )
-        )
-      # predict and put estimates in a data frame
-        pred_mod_nl_pop_temp = predict(
-            mod_nl_pop
-            , newdata = height_range
-            , probs = c(.05, .95)
-          ) %>%
-          dplyr::as_tibble() %>%
-          dplyr::rename(
-            lower_b = 3, upper_b = 4
-          ) %>% 
-          dplyr::rename_with(tolower) %>% 
-          dplyr::select(-c(est.error)) %>% 
-          dplyr::bind_cols(height_range)
-        # str(pred_mod_nl_pop_temp)
-        
-    # # plot predictions with data
-    #   ggplot(
-    #     data = pred_mod_nl_pop_temp
-    #     , mapping = aes(x = tree_height_m)
-    #   ) +
-    #     geom_ribbon(
-    #       mapping = aes(ymin = lower_b, ymax = upper_b)
-    #       , fill = "grey88"
-    #     ) +
-    #     geom_line(
-    #       aes(y = estimate)
-    #       , color = "navy"
-    #       , lwd = 1
-    #     ) +
-    #     labs(
-    #       y = "DBH (cm)"
-    #       , x = "Tree Ht. (m)"
-    #       , title = "Regional height to DBH allometry from US Forest Inventory and Analysis (FIA) data"
-    #     ) +
-    #     theme_light() +
-    #     theme(legend.position = "none", plot.title = element_text(size = 9))
-        
+      , data = treemap_trees_df
+      , prior = p_temp
+      , family = brms::brmsfamily("Gamma")
+      , iter = 4000
+    )
+    # plot(mod_nl_pop)
+    # summary(mod_nl_pop)
+    
+    ## write out model estimates to tabular file
+    #### extract posterior draws to a df
+    brms::as_draws_df(
+      mod_nl_pop
+      , variable = c("^b_", "shape")
+      , regex = TRUE
+    ) %>% 
+      # quick way to get a table of summary statistics and diagnostics
+      posterior::summarize_draws(
+        "mean", "median", "sd"
+        ,  ~quantile(.x, probs = c(
+          0.05, 0.95
+          , 0.025, 0.975
+        ))
+        , "rhat"
+      ) %>% 
+      dplyr::mutate(
+        variable = stringr::str_remove_all(variable, "_Intercept")
+        , formula = summary(mod_nl_pop)$formula %>% 
+          as.character() %>% 
+          .[1]
+      ) %>% 
+      write.csv(
+        paste0(config$delivery_dir, "/regional_dbh_height_model_estimates.csv")
+        , row.names = F
+      )
+    
+    ### obtain model predictions over range
+    # range of x var to predict
+    height_range = dplyr::tibble(
+      tree_height_m = seq(
+        from = 0
+        , to = 116 # tallest tree in the world
+        , by = 0.1 # by 0.1 m increments
+      )
+    )
+    # predict and put estimates in a data frame
+    pred_mod_nl_pop_temp = predict(
+      mod_nl_pop
+      , newdata = height_range
+      , probs = c(.05, .95)
+    ) %>%
+      dplyr::as_tibble() %>%
+      dplyr::rename(
+        lower_b = 3, upper_b = 4
+      ) %>% 
+      dplyr::rename_with(tolower) %>% 
+      dplyr::select(-c(est.error)) %>% 
+      dplyr::bind_cols(height_range) %>% 
+      dplyr::rename(
+        tree_height_m_tnth=tree_height_m
+        , est_dbh_cm = estimate
+        , est_dbh_cm_lower = lower_b
+        , est_dbh_cm_upper = upper_b
+      ) %>% 
+      dplyr::mutate(tree_height_m_tnth=as.character(tree_height_m_tnth)) %>% 
+      dplyr::relocate(tree_height_m_tnth)
+    # str(pred_mod_nl_pop_temp)
+    
+    # save predictions for reading later
+    write.csv(
+      pred_mod_nl_pop_temp
+      , file = paste0(config$delivery_dir, "/regional_dbh_height_model_predictions.csv")
+      , row.names = F
+    )
+
     ###__________________________________________________________###
     ### Predict and filter SfM-derived DBH
     ###__________________________________________________________###
@@ -1796,14 +1797,7 @@ gc()
           tree_height_m_tnth = round(tree_height_m,1) %>% as.character()
         ) %>% 
         dplyr::inner_join(
-          pred_mod_nl_pop_temp %>% 
-            dplyr::rename(
-              tree_height_m_tnth=tree_height_m
-              , est_dbh_cm = estimate
-              , est_dbh_cm_lower = lower_b
-              , est_dbh_cm_upper = upper_b
-            ) %>% 
-            dplyr::mutate(tree_height_m_tnth=as.character(tree_height_m_tnth))
+          pred_mod_nl_pop_temp
           , by = dplyr::join_by(tree_height_m_tnth)  
         ) %>% 
         dplyr::select(-tree_height_m_tnth) %>% 
@@ -1816,44 +1810,44 @@ gc()
         # crowns_sf_joined_stems_temp %>% dplyr::filter(!is.na(stem_dbh_cm)) %>% nrow()
       
       ### build training data set by filtering stems
-      dbh_training_data_temp = crowns_sf_joined_stems_temp %>%
-        sf::st_drop_geometry() %>% 
-        dplyr::filter(
-          !is.na(stem_dbh_cm)
-          & stem_dbh_cm >= est_dbh_cm_lower
-          & stem_dbh_cm <= est_dbh_cm_upper
-        ) %>% 
-        dplyr::group_by(treeID) %>% 
-        # select the minimum difference to regional dbh estimate
-        dplyr::filter(
-          est_dbh_pct_diff==min(est_dbh_pct_diff)
-        ) %>% 
-        # just take one if same dbh
-        dplyr::filter(
-          dplyr::row_number()==1
-        ) %>% 
-        dplyr::ungroup() %>% 
-        dplyr::select(c(
-          treeID # id
-          , stem_dbh_cm # y
-          # x vars
-          , tree_height_m
-          , crown_area_m2
-          , min_crown_ht_m
-          , tidyselect::starts_with("comp_")
-        ))
+        dbh_training_data_temp = crowns_sf_joined_stems_temp %>%
+          sf::st_drop_geometry() %>% 
+          dplyr::filter(
+            !is.na(stem_dbh_cm)
+            & stem_dbh_cm >= est_dbh_cm_lower
+            & stem_dbh_cm <= est_dbh_cm_upper
+          ) %>% 
+          dplyr::group_by(treeID) %>% 
+          # select the minimum difference to regional dbh estimate
+          dplyr::filter(
+            est_dbh_pct_diff==min(est_dbh_pct_diff)
+          ) %>% 
+          # just take one if same dbh
+          dplyr::filter(
+            dplyr::row_number()==1
+          ) %>% 
+          dplyr::ungroup() %>% 
+          dplyr::select(c(
+            treeID # id
+            , stem_dbh_cm # y
+            # x vars
+            , tree_height_m
+            , crown_area_m2
+            , min_crown_ht_m
+            , tidyselect::starts_with("comp_")
+          ))
       # dbh_training_data_temp %>% dplyr::glimpse()
-    
-    ###__________________________________________________________###
-    ### Build local model to estimate missing DBHs using SfM DBHs
-    ###__________________________________________________________###
-      # Use the SfM-detected stems remaining after the filtering workflow 
-      # for the local DBH to height allometric relationship model.
-      
-      # set random seed
-      set.seed(21)
-      
-      ### tuning RF model
+      if(nrow(dbh_training_data_temp)>10){
+        ###__________________________________________________________###
+        ### Build local model to estimate missing DBHs using SfM DBHs
+        ###__________________________________________________________###
+        # Use the SfM-detected stems remaining after the filtering workflow 
+        # for the local DBH to height allometric relationship model.
+        
+        # set random seed
+        set.seed(21)
+        
+        ### tuning RF model
         # If we are interested with just starting out and tuning the mtry parameter 
         # we can use randomForest::tuneRF for a quick and easy tuning assessment. 
         # tuneRf will start at a value of mtry that you supply and increase by a 
@@ -1869,24 +1863,24 @@ gc()
           , trace = F
         )
         # rf_tune_temp
-      
-      ### Run a randomForest model to predict DBH using various crown predictors
+        
+        ### Run a randomForest model to predict DBH using various crown predictors
         stem_prediction_model = randomForest::randomForest(
           y = dbh_training_data_temp$stem_dbh_cm
           , x = dbh_training_data_temp %>% dplyr::select(-c(treeID,stem_dbh_cm))
           , mtry = rf_tune_temp %>% 
-              dplyr::as_tibble() %>% 
-              dplyr::filter(OOBError==min(OOBError)) %>% 
-              dplyr::pull(mtry)
+            dplyr::as_tibble() %>% 
+            dplyr::filter(OOBError==min(OOBError)) %>% 
+            dplyr::pull(mtry)
           , na.action = na.omit
         )
         # stem_prediction_model
         # str(stem_prediction_model)
-    
-      # # variable importance plot
-      #   randomForest::varImpPlot(stem_prediction_model, main = "RF variable importance plot for DBH estimate")
-
-      ## Estimated versus observed DBH
+        
+        # # variable importance plot
+        #   randomForest::varImpPlot(stem_prediction_model, main = "RF variable importance plot for DBH estimate")
+        
+        ## Estimated versus observed DBH
         # data.frame(
         #   dbh_training_data_temp
         #   , predicted = stem_prediction_model$predicted
@@ -1901,83 +1895,115 @@ gc()
         #     , y = "Predicted DBH (cm) by RF"
         #   ) +
         #   theme_light()
-
-    ###___________________________________________________________________###
-    ### Predict missing DBH values for the top down crowns with no DBH ###
-    ###___________________________________________________________________###
+        
+        ###___________________________________________________________________###
+        ### Predict missing DBH values for the top down crowns with no DBH ###
+        ###___________________________________________________________________###
         # nrow(dbh_training_data_temp)
         # nrow(crowns_sf)
-      crowns_sf_predict_only_temp = crowns_sf %>%
-        sf::st_drop_geometry() %>% 
-        dplyr::anti_join(
-          dbh_training_data_temp %>% 
-            dplyr::select(treeID)
-          , by = dplyr::join_by("treeID")
-        ) %>% 
-        dplyr::select(
-          dbh_training_data_temp %>% dplyr::select(-c(stem_dbh_cm)) %>% names()
+        crowns_sf_predict_only_temp = crowns_sf %>%
+          sf::st_drop_geometry() %>% 
+          dplyr::anti_join(
+            dbh_training_data_temp %>% 
+              dplyr::select(treeID)
+            , by = dplyr::join_by("treeID")
+          ) %>% 
+          dplyr::select(
+            dbh_training_data_temp %>% dplyr::select(-c(stem_dbh_cm)) %>% names()
+          )
+        # str(crowns_sf_predict_only_temp)
+        
+        # get predicted dbh
+        predicted_dbh_cm_temp = predict(
+          stem_prediction_model
+          , crowns_sf_predict_only_temp %>% dplyr::select(-treeID)
         )
-      # str(crowns_sf_predict_only_temp)
-      
-      # get predicted dbh
-      predicted_dbh_cm_temp = predict(
-        stem_prediction_model
-        , crowns_sf_predict_only_temp %>% dplyr::select(-treeID)
-      )
-      # summary(predicted_dbh_cm_temp)
-      
-      ## combine predicted data with training data for full data set for all tree crowns with a matched tree top
-      # nrow(crowns_sf)
-      crowns_sf_with_dbh = crowns_sf %>%
-        # join training data
-        dplyr::left_join(
-          dbh_training_data_temp %>% 
-            dplyr::mutate(is_training_data = T) %>% 
-            dplyr::select(treeID, is_training_data, stem_dbh_cm)
-          , by = dplyr::join_by("treeID")
-        ) %>% 
-        # join with predicted data estimates
-        dplyr::left_join(
-          crowns_sf_predict_only_temp %>% 
-            dplyr::mutate(
-              predicted_dbh_cm = predicted_dbh_cm_temp
-            ) %>% 
-            dplyr::select(treeID, predicted_dbh_cm)
-          , by = dplyr::join_by("treeID")
-        ) %>% 
-        # clean up data and calculate metrics from dbh
-        dplyr::mutate(
-          is_training_data = dplyr::coalesce(is_training_data,F)
-          , dbh_cm = dplyr::coalesce(stem_dbh_cm, predicted_dbh_cm)
-          , dbh_m = dbh_cm/100
-          , radius_m = dbh_m/2
-          , basal_area_m2 = pi * (radius_m)^2
-          , basal_area_ft2 = basal_area_m2 * 10.764
-        ) %>% 
-        dplyr::select(
-          !tidyselect::ends_with("_dbh_cm")
-        ) %>% 
-        # join with regional model predictions at 0.1 m height intervals
-        dplyr::mutate(
-          tree_height_m_tnth = round(tree_height_m,1) %>% as.character()
-        ) %>% 
-        dplyr::inner_join(
-          pred_mod_nl_pop_temp %>% 
-            dplyr::rename(
-              tree_height_m_tnth=tree_height_m
-              , reg_est_dbh_cm = estimate
-              , reg_est_dbh_cm_lower = lower_b
-              , reg_est_dbh_cm_upper = upper_b
-            ) %>% 
-            dplyr::mutate(tree_height_m_tnth=as.character(tree_height_m_tnth))
-          , by = dplyr::join_by(tree_height_m_tnth)  
-        ) %>% 
-        dplyr::select(-tree_height_m_tnth)
-      
-      # nrow(crowns_sf_with_dbh)
-      # nrow(crowns_sf)
-      # nrow(tree_tops)
-      
+        # summary(predicted_dbh_cm_temp)
+        
+        ## combine predicted data with training data for full data set for all tree crowns with a matched tree top
+        # nrow(crowns_sf)
+        crowns_sf_with_dbh = crowns_sf %>%
+          # join with regional model predictions at 0.1 m height intervals
+          dplyr::mutate(
+            tree_height_m_tnth = round(tree_height_m,1) %>% as.character()
+          ) %>% 
+          dplyr::inner_join(
+            pred_mod_nl_pop_temp %>% 
+              dplyr::rename(
+                reg_est_dbh_cm = est_dbh_cm
+                , reg_est_dbh_cm_lower = est_dbh_cm_lower
+                , reg_est_dbh_cm_upper = est_dbh_cm_upper
+              )
+            , by = dplyr::join_by(tree_height_m_tnth)  
+          ) %>% 
+          dplyr::select(-tree_height_m_tnth) %>%
+          # join training data
+          dplyr::left_join(
+            dbh_training_data_temp %>% 
+              dplyr::mutate(is_training_data = T) %>% 
+              dplyr::select(treeID, is_training_data, stem_dbh_cm)
+            , by = dplyr::join_by("treeID")
+          ) %>% 
+          # join with predicted data estimates
+          dplyr::left_join(
+            crowns_sf_predict_only_temp %>% 
+              dplyr::mutate(
+                predicted_dbh_cm = predicted_dbh_cm_temp
+              ) %>% 
+              dplyr::select(treeID, predicted_dbh_cm)
+            , by = dplyr::join_by("treeID")
+          ) %>% 
+          # clean up data and calculate metrics from dbh
+          dplyr::mutate(
+            is_training_data = dplyr::coalesce(is_training_data,F)
+            , dbh_cm = dplyr::coalesce(stem_dbh_cm, predicted_dbh_cm, reg_est_dbh_cm)
+            , dbh_m = dbh_cm/100
+            , radius_m = dbh_m/2
+            , basal_area_m2 = pi * (radius_m)^2
+            , basal_area_ft2 = basal_area_m2 * 10.764
+          ) %>% 
+          dplyr::select(-c(stem_dbh_cm, predicted_dbh_cm))
+        
+        # nrow(crowns_sf_with_dbh)
+        # nrow(crowns_sf)
+        # nrow(tree_tops)
+        
+      }else{ # if(nrow(dbh_training_data_temp)>10)
+        ## combine predicted data with training data for full data set for all tree crowns with a matched tree top
+        # nrow(crowns_sf)
+        crowns_sf_with_dbh = crowns_sf %>%
+          # join with regional model predictions at 0.1 m height intervals
+          dplyr::mutate(
+            tree_height_m_tnth = round(tree_height_m,1) %>% as.character()
+          ) %>% 
+          dplyr::inner_join(
+            pred_mod_nl_pop_temp %>% 
+              dplyr::rename(
+                reg_est_dbh_cm = est_dbh_cm
+                , reg_est_dbh_cm_lower = est_dbh_cm_lower
+                , reg_est_dbh_cm_upper = est_dbh_cm_upper
+              )
+            , by = dplyr::join_by(tree_height_m_tnth)  
+          ) %>% 
+          dplyr::select(-tree_height_m_tnth) %>% 
+          # join training data
+          dplyr::mutate(
+            is_training_data = F
+            , stem_dbh_cm = as.numeric(NA)
+            , predicted_dbh_cm = as.numeric(NA)
+          ) %>% 
+          # clean up data and calculate metrics from dbh
+          dplyr::mutate(
+            is_training_data = dplyr::coalesce(is_training_data,F)
+            , dbh_cm = dplyr::coalesce(stem_dbh_cm, predicted_dbh_cm, reg_est_dbh_cm)
+            , dbh_m = dbh_cm/100
+            , radius_m = dbh_m/2
+            , basal_area_m2 = pi * (radius_m)^2
+            , basal_area_ft2 = basal_area_m2 * 10.764
+          ) %>% 
+          dplyr::select(-c(stem_dbh_cm, predicted_dbh_cm))
+        
+      } # else  
     # ggplot(crowns_sf_with_dbh) + 
     #   geom_sf(aes(fill=dbh_cm), color=NA) +
     #   scale_fill_viridis_c(option="plasma") +
@@ -2003,35 +2029,6 @@ gc()
         , quiet = TRUE
       )
 
-      ### plot
-        # ggplot(
-        #   data = crowns_sf_with_dbh
-        #   , mapping = aes(y=tree_height_m, x = dbh_cm)
-        # ) +
-        # geom_point(
-        #   mapping = aes(color = is_training_data)
-        #   , alpha = 0.6
-        #   , size = 0.5
-        # ) +
-        # geom_smooth(
-        #   method = "loess"
-        #   , span = 1
-        #   , color = "gray44"
-        #   , alpha = 0.7
-        # ) +
-        # labs(
-        #   x = "DBH (cm)"
-        #   , y = "Tree Ht. (m)"
-        #   , color = "Training Data"
-        #   , title = "SfM derived tree height and DBH relationship"
-        # ) +
-        # scale_color_manual(values = c("gray", "firebrick")) +
-        # theme_light() +
-        # theme(
-        #   legend.position = "bottom"
-        #   , legend.direction = "horizontal"
-        # )
-  
     # clean up
       remove(list = ls()[grep("_temp",ls())])
       gc()
