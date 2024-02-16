@@ -3,6 +3,25 @@
 # point input_treemap_dir parameter to directory that contains "TreeMap2016.tif" and "TreeMap2016_tree_table.csv"
 ## !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! ##
 
+## !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! ##
+## if the error: Error in any_list[[1]] : subscript out of bounds
+## or if the error: Error: Invalid data: gpstime contains some NAs
+## .... during the normalize step, suggests corrupted las file
+## POTENTIAL FIX IS:
+## !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! ##
+  # las = rlas::read.las("c:/Users/gwoolsey/Downloads/lad_las/pre_RGB_clipped.las")
+  # str(las)
+  # las$gpstime = 0
+  # las$NIR = NULL
+  # str(las)
+  # rlas::write.las(
+  #   file = "c:/Users/gwoolsey/Downloads/lad_las/pre_RGB_clipped_FIXED.las"
+  #   , header = rlas::header_create(las)
+  #   , data = las
+  # )
+## !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! ##
+## !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! ##
+  
 #################################################################################
 #################################################################################
 # Input: raw las/laz point cloud file(s) located in user-specified directory
@@ -31,7 +50,7 @@
   ### use parallel processing? (T/F) ###
   ### parallel processing may not work on all machines ###
   ###____________________###
-  use_parallel_processing = T
+  use_parallel_processing = F
   
   ###____________________###
   ### Set directory for outputs ###
@@ -43,7 +62,7 @@
   ### Set input las directory ###
   ###_________________________###
   # !!!!!!!!!! ENSURE FILES ARE PROJECTED IN CRS THAT USES METRE AS MEASURMENT UNIT
-  input_las_dir = "../data/big_las_raw"
+  input_las_dir = "../data/las_raw"
   # input_las_dir = "../data/small_las_raw"
   
   ###_________________________###
@@ -57,7 +76,7 @@
   desired_chm_res = 0.25
   
   ###_________________________###
-  ### Set the maximum height for the canopy height model
+  ### Set the maximum height (m) for the canopy height model
   ###_________________________###
   max_height_threshold = 60
   
@@ -70,6 +89,15 @@
   ### Set the maximum dbh size (meters)
   ###_________________________###
   dbh_max_size_m = 1
+  
+  ###_________________________###
+  ### Default epsg to use if your las has a blank projection
+  ### this should be the epsg (CRS) that the las was exported with (e.g. from Metashape)
+  ### see: https://epsg.io/
+  ### leave as blank if unsure
+  ###_________________________###
+  # user_supplied_epsg = "6345"
+  user_supplied_epsg = NA
   
 #################################################################################
 #################################################################################
@@ -280,7 +308,7 @@
   ### Pull the las extent geometry
   las_grid = las_ctg@data$geometry %>% 
       sf::st_union() %>% 
-      sf::st_make_grid(100) %>% 
+      sf::st_make_grid(50) %>% 
       sf::st_as_sf() %>% 
       dplyr::mutate(grid_id = dplyr::row_number())
   ### define clip raw las to geometry with lasR pipeline
@@ -326,7 +354,7 @@
       create_grid_las_list = 
         las_grid %>% 
           sf::st_geometry() %>% 
-          purrr::map(safe_lasr_clip_polygon, files = las_ctg, buffer = 10, ofile_dir = config$las_grid_dir)
+          purrr::map(safe_lasr_clip_polygon, files = las_ctg, buffer = 5, ofile_dir = config$las_grid_dir)
     # create spatial index files (.lax)
       create_lax_for_tiles(
         las_file_list = list.files(config$las_grid_dir, pattern = ".*\\.(laz|las)$", full.names = T)
@@ -356,7 +384,15 @@
     raw_las_files = list.files(config$las_grid_dir, pattern = ".*\\.(laz|las)$", full.names = T)
     
     # pull crs for using in write operations
-      crs_list_temp = las_ctg@data$CRS
+      # crs_list_temp = las_ctg@data$CRS
+      crs_list_temp = sf::st_crs(las_ctg)$epsg
+      
+      # handle missing epsg with user defined parameter
+      if(is.na(crs_list_temp) & !is.na(user_supplied_epsg)){
+        crs_list_temp = user_supplied_epsg
+        sf::st_crs(las_ctg) = paste0("EPSG:", user_supplied_epsg)
+      }
+      
       if(length(unique(crs_list_temp))>1){stop("the raw las files have multiple CRS settings")}else{
         proj_crs = paste0("EPSG:",unique(crs_list_temp))
       }
@@ -368,7 +404,7 @@
   # clean up from setup to free some memory
     # check_ls_size_fn(ls())
     remove(
-      las_ctg, create_project_structure, create_grid_las_list
+      create_project_structure, create_grid_las_list
       , lasr_clip_polygon, safe_lasr_clip_polygon, las_grid
     )
   
@@ -936,172 +972,177 @@ if(
   
   # pass this function a file path of the normalized las you wish to detect stems and classify
     write_stem_las_fn <- function(las_path_name, min_tree_height = 2) {
-    ### Get the desired las file
-    las_name = basename(las_path_name)
-    
-    ### See if the las file has been generated
-    path_to_check = paste0(config$las_stem_dir, "/", las_name)
-    does_file_exist = file.exists(path_to_check)
-    ### See if the vector file has been generated
-    path_to_check = paste0(config$stem_poly_tile_dir, "/", tools::file_path_sans_ext(las_name), ".parquet")
-    does_file_exist2 = file.exists(path_to_check)
-    # does_file_exist2
-    
-    # IF FILES DO NOT EXIST...DO IT
-    if(does_file_exist == F | does_file_exist2 == F){
-      ### Read in the desired las file
-      las_norm_tile = lidR::readLAS(las_path_name)
-      las_norm_tile = lidR::filter_poi(las_norm_tile, Z >= 0)
-      
-      # get the maximum point height
-      max_point_height = max(las_norm_tile@data$Z)
-      
-      # IF MAX HEIGHT GOOD...KEEP DOING IT
-      if(max_point_height >= min_tree_height){
-        ###______________________________________________________________###
-        ### 1) Apply the `TreeLS::treeMap` [stem detection function](#detect_stem_fn)
-        ###______________________________________________________________###
-        ### Run the function to search for candidate locations
-        treemap_temp = tree_map_function(las_norm_tile)
+        ### Get the desired las file
+        las_name = basename(las_path_name)
         
-        ### If the class of the result == "LAS"...REALLY KEEP DOING IT
-        if(class(treemap_temp) == "LAS"){
-          ###______________________________________________________________###
-          ### 2) Merge overlapping tree coordinates using `TreeLS::treeMap.merge`
-          ###______________________________________________________________###
-          treemap_temp = TreeLS::treeMap.merge(treemap_temp)
-          ###______________________________________________________________###
-          ### 3) Assign tree IDs to the original points using `TreeLS::treePoints`
-          ###______________________________________________________________###
-          ### Classify tree regions
-          ## Assigns TreeIDs to a LAS object based on coordinates extracted from a treeMap object.
-          las_norm_tile = TreeLS::treePoints(
-            las = las_norm_tile
-            , map = treemap_temp
-            , method = trp.crop(l = 3)
-          )
-          # plot(las_norm_tile, color = "TreeID")
+        ### See if the las file has been generated
+        path_to_check = paste0(config$las_stem_dir, "/", las_name)
+        does_file_exist = file.exists(path_to_check)
+        ### See if the vector file has been generated
+        path_to_check = paste0(config$stem_poly_tile_dir, "/", tools::file_path_sans_ext(las_name), ".parquet")
+        does_file_exist2 = file.exists(path_to_check)
+        # does_file_exist2
+        
+        # IF FILES DO NOT EXIST...DO IT
+        if(does_file_exist == F | does_file_exist2 == F){
+          ### Read in the desired las file
+          las_norm_tile = lidR::readLAS(las_path_name)
+          las_norm_tile = lidR::filter_poi(las_norm_tile, Z >= 0)
           
-          ###______________________________________________________________###
-          ### 4) Flag only the stem points using `TreeLS::stemPoints`
-          ###______________________________________________________________###
-          ### Classify stem points
-          las_norm_tile = TreeLS::stemPoints(
-            las = las_norm_tile
-            , method = stm.hough(
-              # height interval to perform point filtering/assignment/classification.
-              h_step = 0.5
-              # largest tree diameter expected in the point cloud
-              , max_d = 0.75 # 0.75m = 30in
-              # tree base height interval to initiate circle search
-              , h_base = c(1, 2.5)
-              #  pixel side length to discretize the point cloud layers 
-                # while performing the Hough Transform circle search.
-              , pixel_size = 0.025
-              # minimum point density (0 to 1) within a pixel evaluated 
-                # on the Hough Transform - i.e. only dense point clousters will undergo circle search
-                # hey google, define "clouster" ?
-              , min_density = 0.1
-              # minimum number of circle intersections over a pixel 
-                # to assign it as a circle center candidate.
-              , min_votes = 3
-            )
-          )
+          # get the maximum point height
+          max_point_height = max(las_norm_tile@data$Z)
           
-          ###______________________________________________________________###
-          ### 5) DBH estimation is done using `TreeLS::tlsInventory`
-          ###______________________________________________________________###
-          ### Search through tree points and estimate DBH to return a data frame of results
-            tree_inv_df = TreeLS::tlsInventory(
-              las = las_norm_tile
-              # height layer (above ground) to estimate stem diameters, in point cloud units
-              , dh = 1.37
-              # height layer width, in point cloud units
-              , dw = 0.2
-              # parameterized shapeFit function, i.e. method to use for diameter estimation.
-              , d_method = shapeFit(
-                # either "circle" or "cylinder".
-                shape = "circle"
-                # optimization method for estimating the shape's parameters
-                , algorithm = "ransac"
-                # number of points selected on every RANSAC iteration.
-                , n = 20
-              )
-            )
-            # class(tree_inv_df)
-            # tree_inv_df %>% dplyr::glimpse()
-          ###_______________________________________________________###
-          ### 93) clean up the DBH stem data frame ###
-          ###_______________________________________________________###
-            # add details to table and convert to sf data
-            tree_inv_df = tree_inv_df %>% 
-              dplyr::mutate(
-                Radius = as.numeric(Radius)
-                , dbh_m = Radius*2
-                , dbh_cm = dbh_m*100
-                , basal_area_m2 = pi * (Radius)^2
-                , basal_area_ft2 = basal_area_m2 * 10.764
-                , treeID = paste0(X, "_", Y)
-                , stem_x = X
-                , stem_y = Y
-              ) %>% 
-              sf::st_as_sf(coords = c("X", "Y"), crs = sf::st_crs(las_norm_tile)) %>% 
-              dplyr::select(
-                treeID, H, stem_x, stem_y, Radius, Error
-                , dbh_m, dbh_cm, basal_area_m2, basal_area_ft2
-              ) %>% 
-              dplyr::rename(
-                tree_height_m = H
-                , radius_m = Radius
-                , radius_error_m = Error
-              )
-            # tree_inv_df %>% dplyr::glimpse()
+          # IF MAX HEIGHT GOOD...KEEP DOING IT
+          if(max_point_height >= min_tree_height){
+            ###______________________________________________________________###
+            ### 1) Apply the `TreeLS::treeMap` [stem detection function](#detect_stem_fn)
+            ###______________________________________________________________###
+            ### Run the function to search for candidate locations
+            treemap_temp = tree_map_function(las_norm_tile)
             
-            ### Remove points outside the bounding box of the laz tile + 1m buffer
-            tree_inv_df = tree_inv_df %>% 
-              sf::st_crop(
-                sf::st_bbox(las_norm_tile) %>% 
-                  sf::st_as_sfc() %>% 
-                  sf::st_buffer(1)
+            ### If the class of the result == "LAS"...REALLY KEEP DOING IT
+            if(class(treemap_temp) == "LAS"){
+              ###______________________________________________________________###
+              ### 2) Merge overlapping tree coordinates using `TreeLS::treeMap.merge`
+              ###______________________________________________________________###
+              treemap_temp = TreeLS::treeMap.merge(treemap_temp)
+              ###______________________________________________________________###
+              ### 3) Assign tree IDs to the original points using `TreeLS::treePoints`
+              ###______________________________________________________________###
+              ### Classify tree regions
+              ## Assigns TreeIDs to a LAS object based on coordinates extracted from a treeMap object.
+              las_norm_tile = TreeLS::treePoints(
+                las = las_norm_tile
+                , map = treemap_temp
+                , method = trp.crop(l = 3)
               )
-          
-          ###_______________________________________________________###
-          ### Set the classification codes of different point types ###
-          ###_______________________________________________________###
-          
-          ### Pull out the stem files
-          stem_points = lidR::filter_poi(las_norm_tile, Stem == TRUE)
-          stem_points@data$Classification = 4
-          
-          ### Pull out the ground points
-          ground = filter_poi(las_norm_tile, Classification %in% c(2,9))
-          
-          ### Pull out the remaining points that arent ground
-          remaining_points = filter_poi(las_norm_tile, Stem == FALSE & !(Classification %in% c(2,9)))
-          remaining_points@data$Classification = 5
-          
-          ### Combine the newly classified data
-          las_reclassified = rbind(stem_points, ground, remaining_points)
-          # str(las_reclassified)
-          # class(las_reclassified)
-          # plot(las_reclassified, color = "Classification")
-          
-          ###_______________________________________________________###
-          ### Write output to disk ###
-          ###_______________________________________________________###
-          ### Write the stem points to the disk
-          lidR::writeLAS(las_reclassified, paste0(config$las_stem_dir, "/", las_name))
-          
-          ### Write stem polygons to the disk
-          out_name = tools::file_path_sans_ext(las_name)
-          out_name = paste0(config$stem_poly_tile_dir, "/", out_name, ".parquet")
-          sfarrow::st_write_parquet(tree_inv_df, out_name)
-          
-          return(T)
-        }else{return(F)} # tree_map_function() return is LAS
-      }else{return(F)} # max_point_height >= min_tree_height
-    }else{return(F)} # DOES FILE EXIST == F
-  } # write_stem_las_fn
+              # plot(las_norm_tile, color = "TreeID")
+              
+              ###______________________________________________________________###
+              ### 4) Flag only the stem points using `TreeLS::stemPoints`
+              ###______________________________________________________________###
+              ### Classify stem points
+              las_norm_tile = TreeLS::stemPoints(
+                las = las_norm_tile
+                , method = stm.hough(
+                  # height interval to perform point filtering/assignment/classification.
+                  h_step = 0.5
+                  # largest tree diameter expected in the point cloud
+                  , max_d = 0.75 # 0.75m = 30in
+                  # tree base height interval to initiate circle search
+                  , h_base = c(1, 2.5)
+                  #  pixel side length to discretize the point cloud layers 
+                    # while performing the Hough Transform circle search.
+                  , pixel_size = 0.025
+                  # minimum point density (0 to 1) within a pixel evaluated 
+                    # on the Hough Transform - i.e. only dense point clousters will undergo circle search
+                    # hey google, define "clouster" ?
+                  , min_density = 0.1
+                  # minimum number of circle intersections over a pixel 
+                    # to assign it as a circle center candidate.
+                  , min_votes = 3
+                )
+              )
+              
+              ###______________________________________________________________###
+              ### 5) DBH estimation is done using `TreeLS::tlsInventory`
+              ###______________________________________________________________###
+              ### Search through tree points and estimate DBH to return a data frame of results
+                tree_inv_df = TreeLS::tlsInventory(
+                  las = las_norm_tile
+                  # height layer (above ground) to estimate stem diameters, in point cloud units
+                  , dh = 1.37
+                  # height layer width, in point cloud units
+                  , dw = 0.2
+                  # parameterized shapeFit function, i.e. method to use for diameter estimation.
+                  , d_method = shapeFit(
+                    # either "circle" or "cylinder".
+                    shape = "circle"
+                    # optimization method for estimating the shape's parameters
+                    , algorithm = "ransac"
+                    # number of points selected on every RANSAC iteration.
+                    , n = 20
+                  )
+                )
+                # class(tree_inv_df)
+                # tree_inv_df %>% dplyr::glimpse()
+            if(nrow(tree_inv_df)>0){
+              ###_______________________________________________________###
+              ### 93) clean up the DBH stem data frame ###
+              ###_______________________________________________________###
+                # add details to table and convert to sf data
+                tree_inv_df = tree_inv_df %>% 
+                  dplyr::mutate(
+                    Radius = as.numeric(Radius)
+                    , dbh_m = Radius*2
+                    , dbh_cm = dbh_m*100
+                    , basal_area_m2 = pi * (Radius)^2
+                    , basal_area_ft2 = basal_area_m2 * 10.764
+                    , treeID = paste0(X, "_", Y)
+                    , stem_x = X
+                    , stem_y = Y
+                  ) %>% 
+                  sf::st_as_sf(coords = c("X", "Y"), crs = sf::st_crs(las_norm_tile)) %>% 
+                  dplyr::select(
+                    treeID, H, stem_x, stem_y, Radius, Error
+                    , dbh_m, dbh_cm, basal_area_m2, basal_area_ft2
+                  ) %>% 
+                  dplyr::rename(
+                    tree_height_m = H
+                    , radius_m = Radius
+                    , radius_error_m = Error
+                  )
+                # tree_inv_df %>% dplyr::glimpse()
+                
+                ### Remove points outside the bounding box of the laz tile + 1m buffer
+                tree_inv_df = tree_inv_df %>% 
+                  sf::st_crop(
+                    sf::st_bbox(las_norm_tile) %>% 
+                      sf::st_as_sfc() %>% 
+                      sf::st_buffer(1)
+                  )
+              
+              ###_______________________________________________________###
+              ### Set the classification codes of different point types ###
+              ###_______________________________________________________###
+              
+              ### Pull out the stem files
+              stem_points = lidR::filter_poi(las_norm_tile, Stem == TRUE)
+              stem_points@data$Classification = 4
+              
+              ### Pull out the ground points
+              ground = filter_poi(las_norm_tile, Classification %in% c(2,9))
+              
+              ### Pull out the remaining points that arent ground
+              remaining_points = filter_poi(las_norm_tile, Stem == FALSE & !(Classification %in% c(2,9)))
+              remaining_points@data$Classification = 5
+              
+              ### Combine the newly classified data
+              las_reclassified = rbind(stem_points, ground, remaining_points)
+              # str(las_reclassified)
+              # class(las_reclassified)
+              # plot(las_reclassified, color = "Classification")
+              
+              ###_______________________________________________________###
+              ### Write output to disk ###
+              ###_______________________________________________________###
+              ### Write the stem points to the disk
+              if(class(las_reclassified)=="LAS"){
+                lidR::writeLAS(las_reclassified, paste0(config$las_stem_dir, "/", las_name))
+              }
+              
+              ### Write stem polygons to the disk
+              out_name = tools::file_path_sans_ext(las_name)
+              out_name = paste0(config$stem_poly_tile_dir, "/", out_name, ".parquet")
+              if(max(class(tree_inv_df)=="sf")==1){
+                sfarrow::st_write_parquet(tree_inv_df, out_name)
+              }
+              return(T)
+            }else{return(F)} # nrow(tree_inv_df)>0
+          }else{return(F)} # tree_map_function() return is LAS
+        }else{return(F)} # max_point_height >= min_tree_height
+      }else{return(F)} # DOES FILE EXIST == F
+    } # write_stem_las_fn
   
   #######################################
   ### call write_stem_las_fn
@@ -1332,7 +1373,7 @@ if(
     ) %>% 
     # intersect with study bounds
     sf::st_intersection(
-      readLAScatalog(config$input_las_dir)@data$geometry %>% 
+      las_ctg@data$geometry %>% 
         sf::st_union() %>% 
         sf::st_as_sf()
     ) %>% 
@@ -1580,13 +1621,13 @@ gc()
     ### filter treemap based on las...rast now in memory
     treemap_rast = treemap_rast %>% 
       terra::crop(
-        readLAScatalog(config$input_las_dir)@data$geometry %>% 
+        las_ctg@data$geometry %>% 
           sf::st_union() %>% 
           terra::vect() %>% 
           terra::project(terra::crs(treemap_rast))
       ) %>% 
       terra::mask(
-        readLAScatalog(config$input_las_dir)@data$geometry %>% 
+        las_ctg@data$geometry %>% 
           sf::st_union() %>% 
           terra::vect() %>% 
           terra::project(terra::crs(treemap_rast))
@@ -2019,7 +2060,7 @@ gc()
         dplyr::ungroup() %>% 
         dplyr::mutate(
           plotID = "1" # can spatially join to plot vectors if available
-          , plot_area_m2 = readLAScatalog(config$input_las_dir)@data$geometry %>% 
+          , plot_area_m2 = las_ctg@data$geometry %>% 
             sf::st_union() %>% 
             sf::st_area() %>% # result is m2
             as.numeric()
@@ -2115,7 +2156,7 @@ gc()
         )
     
     # this would just be a vector file if available
-      silv_metrics_temp = readLAScatalog(config$input_las_dir)@data$geometry %>%
+      silv_metrics_temp = las_ctg@data$geometry %>%
         sf::st_union() %>% 
         sf::st_as_sf() %>% 
         dplyr::mutate(
@@ -2152,7 +2193,7 @@ gc()
       unlink(config$temp_dir, recursive = T)
     }
     # message
-    las_ctg_temp = lidR::readLAScatalog(config$input_las_dir)@data
+    las_ctg_temp = las_ctg@data
     message(
       "total time was "
       , round(as.numeric(difftime(Sys.time(), full_start_time, units = c("mins"))),2)
