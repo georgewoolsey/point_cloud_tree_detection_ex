@@ -63,7 +63,7 @@
   ###_________________________###
   # !!!!!!!!!! ENSURE FILES ARE PROJECTED IN CRS THAT USES METRE AS MEASURMENT UNIT
   # input_las_dir = "../data/small_las_raw"
-  input_las_dir = "../data/las_raw"
+  input_las_dir = "../data/big_las_raw"
   
   ###_________________________###
   ### Set input TreeMap directory ###
@@ -1263,9 +1263,9 @@ if(
       y = dplyr::case_when(
         is.na(x) ~ 1e-3 # requires non-null
         , x < 0 ~ 1e-3 # requires positive
-        , x < 2 ~ 2 # set lower bound
+        , x < 2 ~ 1 # set lower bound
         , x > 30 ~ 5  # set upper bound
-        , TRUE ~ 2 + (x * 0.1)
+        , TRUE ~ 0.75 + (x * 0.14)
       )
       return(y)
     }
