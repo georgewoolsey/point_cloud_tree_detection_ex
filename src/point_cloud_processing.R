@@ -44,12 +44,14 @@
   ### this process writes intermediate data to the disk
   ### keep those intermediate files (classfied, normalized, stem las files)
   ###____________________###
+  # keep_intermediate_files = F
   keep_intermediate_files = F
   
   ###____________________###
   ### use parallel processing? (T/F) ###
   ### parallel processing may not work on all machines ###
   ###____________________###
+  # use_parallel_processing = F
   use_parallel_processing = F
   
   ###____________________###
@@ -63,7 +65,7 @@
   ###_________________________###
   # !!!!!!!!!! ENSURE FILES ARE PROJECTED IN CRS THAT USES METRE AS MEASURMENT UNIT
   # input_las_dir = "../data/small_las_raw"
-  input_las_dir = "../data/big_las_raw"
+  input_las_dir = "../data/small_las_raw"
   
   ###_________________________###
   ### Set input TreeMap directory ###
@@ -74,22 +76,34 @@
   ###_________________________###
   ### Set the desired raster resolution in metres for the canopy height model
   ###_________________________###
+  # desired_chm_res = 0.25
   desired_chm_res = 0.25
   
   ###_________________________###
   ### Set the maximum height (m) for the canopy height model
   ###_________________________###
+  # max_height_threshold = 60
   max_height_threshold = 60
   
   ###_________________________###
   ### Set the minimum height (m) for individual tree detection in `lidR::locate_trees`
   ###_________________________###
+  # minimum_tree_height = 1.37
   minimum_tree_height = 2
   
   ###_________________________###
   ### Set the maximum dbh size (meters)
   ###_________________________###
+  # dbh_max_size_m = 1
   dbh_max_size_m = 1
+  
+  ###_________________________###
+  ### Set the model to use for local dbh-height allometry
+  ### can be "rf" for random forest or "lin" for linear 
+  ###_________________________###
+  # local_dbh_model = "rf"
+  # local_dbh_model = "lin"
+  local_dbh_model = "rf"
   
   ###_________________________###
   ### Default epsg to use if your las has a blank projection
@@ -309,7 +323,7 @@
   ### Pull the las extent geometry
   las_grid = las_ctg@data$geometry %>% 
       sf::st_union() %>% 
-      sf::st_make_grid(50) %>% 
+      sf::st_make_grid(90) %>% 
       sf::st_as_sf() %>% 
       dplyr::mutate(grid_id = dplyr::row_number())
   ### define clip raw las to geometry with lasR pipeline
@@ -1426,7 +1440,7 @@ if(
   
   ### calculate distance to nearest neighbor
     ### cap distance to nearest tree within xxm buffer
-    dist_buffer_temp = 50
+    dist_buffer_temp = 35
     # get trees within radius
     dist_tree_tops_temp = tree_tops %>% 
       dplyr::select(treeID) %>% 
@@ -1814,6 +1828,7 @@ gc()
           sf::st_drop_geometry() %>% 
           dplyr::filter(
             !is.na(stem_dbh_cm)
+            & stem_dbh_cm > 0
             & stem_dbh_cm >= est_dbh_cm_lower
             & stem_dbh_cm <= est_dbh_cm_upper
           ) %>% 
@@ -1843,58 +1858,72 @@ gc()
         ###__________________________________________________________###
         # Use the SfM-detected stems remaining after the filtering workflow 
         # for the local DBH to height allometric relationship model.
-        
-        # set random seed
-        set.seed(21)
-        
-        ### tuning RF model
-        # If we are interested with just starting out and tuning the mtry parameter 
-        # we can use randomForest::tuneRF for a quick and easy tuning assessment. 
-        # tuneRf will start at a value of mtry that you supply and increase by a 
-        # certain step factor until the OOB error stops improving be a specified amount.
-        rf_tune_temp = randomForest::tuneRF(
-          y = dbh_training_data_temp$stem_dbh_cm
-          , x = dbh_training_data_temp %>% dplyr::select(-c(treeID,stem_dbh_cm))
-          , stepFactor = 0.5
-          , ntreeTry = 500
-          , mtryStart = 0.5
-          , improve = 0.01
-          , plot = F
-          , trace = F
-        )
-        # rf_tune_temp
-        
-        ### Run a randomForest model to predict DBH using various crown predictors
-        stem_prediction_model = randomForest::randomForest(
-          y = dbh_training_data_temp$stem_dbh_cm
-          , x = dbh_training_data_temp %>% dplyr::select(-c(treeID,stem_dbh_cm))
-          , mtry = rf_tune_temp %>% 
-            dplyr::as_tibble() %>% 
-            dplyr::filter(OOBError==min(OOBError)) %>% 
-            dplyr::pull(mtry)
-          , na.action = na.omit
-        )
-        # stem_prediction_model
-        # str(stem_prediction_model)
-        
-        # # variable importance plot
-        #   randomForest::varImpPlot(stem_prediction_model, main = "RF variable importance plot for DBH estimate")
-        
-        ## Estimated versus observed DBH
-        # data.frame(
-        #   dbh_training_data_temp
-        #   , predicted = stem_prediction_model$predicted
-        # ) %>% 
-        # ggplot() +
-        #   geom_abline() +
-        #   geom_point(mapping = aes(x = stem_dbh_cm, y = predicted)) +
-        #   scale_x_continuous(limits = c(0,max(dbh_training_data_temp$stem_dbh_cm)*1.05)) +
-        #   scale_y_continuous(limits = c(0,max(dbh_training_data_temp$stem_dbh_cm)*1.05)) +
-        #   labs(
-        #     x = "SfM DBH (cm)"
-        #     , y = "Predicted DBH (cm) by RF"
-        #   ) +
-        #   theme_light()
+        if(local_dbh_model == "rf"){
+          # set random seed
+          set.seed(21)
+          
+          ### tuning RF model
+          # If we are interested with just starting out and tuning the mtry parameter 
+          # we can use randomForest::tuneRF for a quick and easy tuning assessment. 
+          # tuneRf will start at a value of mtry that you supply and increase by a 
+          # certain step factor until the OOB error stops improving be a specified amount.
+          rf_tune_temp = randomForest::tuneRF(
+            y = dbh_training_data_temp$stem_dbh_cm
+            , x = dbh_training_data_temp %>% dplyr::select(-c(treeID,stem_dbh_cm))
+            , stepFactor = 0.5
+            , ntreeTry = 500
+            , mtryStart = 0.5
+            , improve = 0.01
+            , plot = F
+            , trace = F
+          )
+          # rf_tune_temp
+          
+          ### Run a randomForest model to predict DBH using various crown predictors
+          stem_prediction_model = randomForest::randomForest(
+            y = dbh_training_data_temp$stem_dbh_cm
+            , x = dbh_training_data_temp %>% dplyr::select(-c(treeID,stem_dbh_cm))
+            , mtry = rf_tune_temp %>% 
+              dplyr::as_tibble() %>% 
+              dplyr::filter(OOBError==min(OOBError)) %>% 
+              dplyr::pull(mtry)
+            , na.action = na.omit
+          )
+          # stem_prediction_model
+          # str(stem_prediction_model)
+          
+          # # variable importance plot
+          #   randomForest::varImpPlot(stem_prediction_model, main = "RF variable importance plot for DBH estimate")
+          
+          ## Estimated versus observed DBH
+          # data.frame(
+          #   dbh_training_data_temp
+          #   , predicted = stem_prediction_model$predicted
+          # ) %>% 
+          # ggplot() +
+          #   geom_abline() +
+          #   geom_point(mapping = aes(x = stem_dbh_cm, y = predicted)) +
+          #   scale_x_continuous(limits = c(0,max(dbh_training_data_temp$stem_dbh_cm)*1.05)) +
+          #   scale_y_continuous(limits = c(0,max(dbh_training_data_temp$stem_dbh_cm)*1.05)) +
+          #   labs(
+          #     x = "SfM DBH (cm)"
+          #     , y = "Predicted DBH (cm) by RF"
+          #   ) +
+          #   theme_light()
+            
+        }else{
+          # population model with no random effects (i.e. no group-level variation)
+          # Gamma distribution for strictly positive response variable dbh
+          stem_prediction_model = brms::brm(
+            formula = stem_dbh_cm ~ 1 + tree_height_m
+            , data = dbh_training_data_temp %>% 
+                dplyr::select(stem_dbh_cm, tree_height_m)
+            , family = brms::brmsfamily("Gamma", link = "log")
+            , prior = c(prior(gamma(0.01, 0.01), class = shape))
+            , iter = 4000
+            # , file = "../data/mod_lin"
+          )
+        }
         
         ###___________________________________________________________________###
         ### Predict missing DBH values for the top down crowns with no DBH ###
@@ -1917,7 +1946,9 @@ gc()
         predicted_dbh_cm_temp = predict(
           stem_prediction_model
           , crowns_sf_predict_only_temp %>% dplyr::select(-treeID)
-        )
+        ) %>% 
+        dplyr::as_tibble() %>% 
+        dplyr::pull(1)
         # summary(predicted_dbh_cm_temp)
         
         ## combine predicted data with training data for full data set for all tree crowns with a matched tree top
