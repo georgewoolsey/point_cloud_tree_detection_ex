@@ -198,6 +198,7 @@
   
     ### Set output directory for temporary files
     las_grid_dir = file.path(temp_dir, "00_grid")
+    las_denoise_dir = file.path(temp_dir, "0_denoise")
     las_classify_dir = file.path(temp_dir, "01_classify")
     las_normalize_dir = file.path(temp_dir, "02_normalize")
     dtm_dir = file.path(temp_dir, "03_dtm")
@@ -209,6 +210,7 @@
     dir.create(delivery_dir, showWarnings = FALSE)
     dir.create(temp_dir, showWarnings = FALSE)
     dir.create(las_grid_dir, showWarnings = FALSE)
+    dir.create(las_denoise_dir, showWarnings = FALSE)
     dir.create(las_classify_dir, showWarnings = FALSE)
     dir.create(las_normalize_dir, showWarnings = FALSE)
     dir.create(dtm_dir, showWarnings = FALSE)
@@ -226,6 +228,7 @@
     names(delivery_dir) = "delivery_dir"
     names(temp_dir) = "temp_dir"
     names(las_grid_dir) = "las_grid_dir"
+    names(las_denoise_dir) = "las_denoise_dir"
     names(las_classify_dir) = "las_classify_dir"
     names(las_normalize_dir) = "las_normalize_dir"
     names(dtm_dir) = "dtm_dir"
@@ -239,7 +242,7 @@
     
     config = cbind(
       rootdir, input_las_dir, input_treemap_dir
-      , delivery_dir, temp_dir, las_grid_dir, las_classify_dir
+      , delivery_dir, temp_dir, las_grid_dir, las_denoise_dir, las_classify_dir
       , las_normalize_dir, dtm_dir, chm_dir
       , las_stem_dir, stem_poly_tile_dir
     )
@@ -468,12 +471,11 @@ if(
       # these files will be used for creating the classified las
     las_denoise_flist = lasr_denoise_pipeline(
       files = flist_temp
-      # , ofile = paste0(config$temp_dir, "/*_denoise.las")
+      , ofile = paste0(config$las_denoise_dir, "/*_denoise.las")
     )
     
-    # las_denoise_flist
-    # lidR::readLAS(las_denoise_flist[1]) %>% plot()
-    # lidR::readLAS(las_denoise_flist[1])@data %>% dplyr::count(Classification)
+    # create spatial index files (.lax)
+    create_lax_for_tiles(las_denoise_flist)
     
     # clean up
     remove(list = ls()[grep("_temp",ls())])
