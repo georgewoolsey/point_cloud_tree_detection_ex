@@ -52,7 +52,7 @@
   ### parallel processing may not work on all machines ###
   ###____________________###
   # use_parallel_processing = F
-  use_parallel_processing = F
+  use_parallel_processing = T
   
   ###____________________###
   ### Set directory for outputs ###
@@ -64,8 +64,8 @@
   ### Set input las directory ###
   ###_________________________###
   # !!!!!!!!!! ENSURE FILES ARE PROJECTED IN CRS THAT USES METRE AS MEASURMENT UNIT
-  # input_las_dir = "../data/small_las_raw"
-  input_las_dir = "../data/small_las_raw"
+  # input_las_dir = "../data/testtest"
+  input_las_dir = "../data/lower_sherwin"
   
   ###_________________________###
   ### Set input TreeMap directory ###
@@ -82,20 +82,20 @@
   ###_________________________###
   ### Set the maximum height (m) for the canopy height model
   ###_________________________###
-  # max_height_threshold = 60
-  max_height_threshold = 60
+  # max_height_threshold_m = 60
+  max_height_threshold_m = 60
   
   ###_________________________###
   ### Set the minimum height (m) for individual tree detection in `lidR::locate_trees`
   ###_________________________###
-  # minimum_tree_height = 1.37
-  minimum_tree_height = 2
+  # minimum_tree_height_m = 1.37
+  minimum_tree_height_m = 2
   
   ###_________________________###
   ### Set the maximum dbh size (meters)
   ###_________________________###
   # dbh_max_size_m = 1
-  dbh_max_size_m = 1
+  dbh_max_size_m = 7
   
   ###_________________________###
   ### Set the model to use for local dbh-height allometry
@@ -113,6 +113,16 @@
   ###_________________________###
   # user_supplied_epsg = "6345"
   user_supplied_epsg = NA
+  
+  ###_________________________###
+  ### set the size and buffer for gridded las tiles
+  ### gridded las tiles are used to process data in chuncks
+  ### if point density is very high, set grid res to 40-70
+  ###_________________________###
+  # las_grid_res_m = 62
+  # las_grid_buff_m = 6
+  las_grid_res_m = 62
+  las_grid_buff_m = 6
   
 #################################################################################
 #################################################################################
@@ -302,6 +312,8 @@
       })
   }
 
+# start time
+  xx1_tile_start_time = Sys.time()
 #################################################################################
 #################################################################################
 # Tile raw las files to work with smaller chunks
@@ -326,7 +338,7 @@
   ### Pull the las extent geometry
   las_grid = las_ctg@data$geometry %>% 
       sf::st_union() %>% 
-      sf::st_make_grid(90) %>% 
+      sf::st_make_grid(las_grid_res_m) %>% 
       sf::st_as_sf() %>% 
       dplyr::mutate(grid_id = dplyr::row_number())
   ### define clip raw las to geometry with lasR pipeline
@@ -372,7 +384,7 @@
       create_grid_las_list = 
         las_grid %>% 
           sf::st_geometry() %>% 
-          purrr::map(safe_lasr_clip_polygon, files = las_ctg, buffer = 5, ofile_dir = config$las_grid_dir)
+          purrr::map(safe_lasr_clip_polygon, files = las_ctg, buffer = las_grid_buff_m, ofile_dir = config$las_grid_dir)
     # create spatial index files (.lax)
       create_lax_for_tiles(
         las_file_list = list.files(config$las_grid_dir, pattern = ".*\\.(laz|las)$", full.names = T)
@@ -425,7 +437,8 @@
       create_project_structure, create_grid_las_list
       , lasr_clip_polygon, safe_lasr_clip_polygon, las_grid
     )
-  
+# start time
+  xx2_denoise_start_time = Sys.time()  
 #################################################################################
 #################################################################################
 # Denoise raw point cloud
@@ -481,6 +494,8 @@ if(
     remove(list = ls()[grep("_temp",ls())])
     gc()
 }
+# start time
+  xx3_classify_start_time = Sys.time()
 #################################################################################
 #################################################################################
 # Classify ground points
@@ -563,6 +578,8 @@ if(
     #switch to overwrite rasters since this section created new data
     overwrite_raster = T
 }
+# start time
+  xx4_dtm_start_time = Sys.time()
 #################################################################################
 #################################################################################
 # Create digital terrain model (DTM) raster
@@ -669,6 +686,8 @@ if(
 }else if(file.exists(dtm_file_name) == T){
   dtm_rast = terra::rast(dtm_file_name)
 }
+# start time
+  xx5_normalize_start_time = Sys.time()
 #################################################################################
 #################################################################################
 # Height normalize points 
@@ -821,7 +840,8 @@ if(
   #switch to overwrite rasters since this section created new data
     overwrite_raster = T
 }
-
+# start time
+  xx6_chm_start_time = Sys.time()
 #################################################################################
 #################################################################################
 # Create canopy height model (CHM) raster in lasR pipeline
@@ -852,9 +872,9 @@ if(
         , operators = "max"
         , filter = paste0(
           "-drop_class 2 9 -drop_z_below "
-          , minimum_tree_height
+          , minimum_tree_height_m
           , " -drop_z_above "
-          , max_height_threshold
+          , max_height_threshold_m
         )
       )
     # Pits and spikes filling for raster with algorithm from St-Onge 2008 (see reference).
@@ -918,7 +938,8 @@ if(
 }else if(file.exists(chm_file_name) == T){
   chm_rast = terra::rast(chm_file_name)
 }
-
+# start time
+  xx7_treels_start_time = Sys.time()
 #################################################################################
 #################################################################################
 # Detect tree stems 
@@ -1184,7 +1205,7 @@ if(
               , .packages = c("tools","lidR","tidyverse","doParallel","TreeLS")
               , .inorder = F
             ) %dopar% {
-              write_stem_las_fn(las_path_name = flist_temp[i], min_tree_height = minimum_tree_height)
+              write_stem_las_fn(las_path_name = flist_temp[i], min_tree_height = minimum_tree_height_m)
             } # end foreach
           # write_stem_las_ans
         # stop parallel
@@ -1196,7 +1217,7 @@ if(
       # map over the normalized point cloud tiles
       write_stem_las_ans = 
         list.files(config$las_normalize_dir, pattern = ".*\\.(laz|las)$", full.names = T) %>%
-          purrr::map(write_stem_las_fn, min_tree_height = minimum_tree_height)
+          purrr::map(write_stem_las_fn, min_tree_height = minimum_tree_height_m)
     }
   
   # get file list
@@ -1259,7 +1280,8 @@ if(
   # clean up
   remove(list = ls()[grep("_temp",ls())])
   gc()
-
+# start time
+  xx8_itd_start_time = Sys.time()
 #################################################################################
 #################################################################################
 # CHM Individual Tree Detection
@@ -1295,7 +1317,7 @@ if(
         chm_rast
         , algorithm = lmf(
           ws = ws_fn
-          , hmin = minimum_tree_height
+          , hmin = minimum_tree_height_m
         )
       )
   
@@ -1334,14 +1356,14 @@ if(
       #     chm = chm_rast %>% stars::st_as_stars()
       #       # terra::subst(from = as.numeric(NA), to = 0)
       #     # threshold below which a pixel cannot be a tree. Default is 2
-      #     , th_tree = minimum_tree_height
+      #     , th_tree = minimum_tree_height_m
       #   )() # keep this additional parentheses's so it will work ?lidR::watershed
   
     # using ForestTools instead ..........
       crowns = ForestTools::mcws(
         treetops = sf::st_zm(tree_tops, drop = T) # drops z values
         , CHM = chm_rast
-        , minHeight = minimum_tree_height
+        , minHeight = minimum_tree_height_m
       )
     
     # str(crowns)
@@ -1358,7 +1380,8 @@ if(
   # clean up
     remove(list = ls()[grep("_temp",ls())])
     gc()
-
+# start time
+  xx9_competition_start_time = Sys.time()
 #################################################################################
 #################################################################################
 # Calculate local tree competition metrics for use in modelling
@@ -1382,12 +1405,12 @@ if(
   # str(tree_tops)
     
   ### set buffer around tree to calculate competition metrics
-  competition_buffer_temp = 5
+  competition_buffer_m = 5
   ### how much of the buffered tree area is within the study boundary?
     # use this to scale the TPA estimates below
   tree_tops_pct_buffer_temp = tree_tops %>% 
     # buffer point
-    sf::st_buffer(competition_buffer_temp) %>% 
+    sf::st_buffer(competition_buffer_m) %>% 
     dplyr::mutate(
       point_buffer_area_m2 = as.numeric(sf::st_area(.))
     ) %>% 
@@ -1407,7 +1430,7 @@ if(
   ### use the tree top location points to get competition metrics
   comp_tree_tops_temp = tree_tops %>% 
     # buffer point
-    sf::st_buffer(competition_buffer_temp) %>% 
+    sf::st_buffer(competition_buffer_m) %>% 
     dplyr::select(treeID, tree_height_m) %>% 
     # spatial join with all tree points
     sf::st_join(
@@ -1510,7 +1533,8 @@ if(
   # clean up
   remove(list = ls()[grep("_temp",ls())])
   gc()
-
+# start time
+  xx10_estdbh_start_time = Sys.time()
 #################################################################################
 #################################################################################
 # Spatial join the tree tops with the tree crowns
@@ -1718,7 +1742,7 @@ gc()
     ###__________________________________________________________###
     gc()
     # population model with no random effects (i.e. no group-level variation)
-    # quadratic model form with Gamma distribution for strictly positive response variable dbh
+    # non-linear model form with Gamma distribution for strictly positive response variable dbh
     # set up prior
     p_temp <- prior(normal(1, 2), nlpar = "b1") +
       prior(normal(0, 2), nlpar = "b2")
@@ -1768,7 +1792,7 @@ gc()
     height_range = dplyr::tibble(
       tree_height_m = seq(
         from = 0
-        , to = 116 # tallest tree in the world
+        , to = 120 # tallest tree in the world
         , by = 0.1 # by 0.1 m increments
       )
     )
@@ -2065,7 +2089,8 @@ gc()
     # clean up
       remove(list = ls()[grep("_temp",ls())])
       gc()
-
+# start time
+  xx11_silv_start_time = Sys.time()
 #################################################################################
 #################################################################################
 # Calculate Silviculture Metrics
@@ -2222,15 +2247,81 @@ gc()
     if(keep_intermediate_files==F){
       unlink(config$temp_dir, recursive = T)
     }
-    # message
-    las_ctg_temp = las_ctg@data
+    # clean up
+      remove(list = ls()[grep("_temp",ls())])
+      gc()
+#################################################################################
+#################################################################################
+# create data to return
+#################################################################################
+#################################################################################
+xx86_end_time = Sys.time()
+  # message
     message(
       "total time was "
-      , round(as.numeric(difftime(Sys.time(), full_start_time, units = c("mins"))),2)
+      , round(as.numeric(difftime(xx86_end_time, xx1_tile_start_time, units = c("mins"))),2)
       , " minutes to process "
-      , scales::comma(sum(las_ctg_temp$Number.of.point.records))
+      , scales::comma(sum(las_ctg@data$Number.of.point.records))
       , " points over an area of "
-      , scales::comma(as.numeric(las_ctg_temp$geometry %>% sf::st_union() %>% sf::st_area())/10000,accuracy = 0.01)
+      , scales::comma(as.numeric(las_ctg@data$geometry %>% sf::st_union() %>% sf::st_area())/10000,accuracy = 0.01)
       , " hectares"
     )
+  # data
+  return_df = 
+      # data from las_ctg
+      las_ctg@data %>% 
+      st_set_geometry("geometry") %>% 
+      dplyr::summarise(
+        geometry = sf::st_union(geometry)
+        , number_of_points = sum(Number.of.point.records, na.rm = T)
+      ) %>% 
+      dplyr::mutate(
+        las_area_m2 = sf::st_area(geometry) %>% as.numeric()
+      ) %>% 
+      sf::st_drop_geometry() %>% 
+      dplyr::mutate(
+        timer_tile_time_mins = difftime(xx2_denoise_start_time, xx1_tile_start_time, units = c("mins")) %>% 
+          as.numeric()
+        , timer_denoise_time_mins = difftime(xx3_classify_start_time, xx2_denoise_start_time, units = c("mins")) %>% 
+          as.numeric()
+        , timer_classify_time_mins = difftime(xx4_dtm_start_time, xx3_classify_start_time, units = c("mins")) %>% 
+          as.numeric()
+        , timer_dtm_time_mins = difftime(xx5_normalize_start_time, xx4_dtm_start_time, units = c("mins")) %>% 
+          as.numeric()
+        , timer_normalize_time_mins = difftime(xx6_chm_start_time, xx5_normalize_start_time, units = c("mins")) %>% 
+          as.numeric()
+        , timer_chm_time_mins = difftime(xx7_treels_start_time, xx6_chm_start_time, units = c("mins")) %>% 
+          as.numeric()
+        , timer_treels_time_mins = difftime(xx8_itd_start_time, xx7_treels_start_time, units = c("mins")) %>% 
+          as.numeric()
+        , timer_itd_time_mins = difftime(xx9_competition_start_time, xx8_itd_start_time, units = c("mins")) %>% 
+          as.numeric()
+        , timer_competition_time_mins = difftime(xx10_estdbh_start_time, xx9_competition_start_time, units = c("mins")) %>% 
+          as.numeric()
+        , timer_estdbh_time_mins = difftime(xx11_silv_start_time, xx10_estdbh_start_time, units = c("mins")) %>% 
+          as.numeric()
+        , timer_silv_time_mins = difftime(xx86_end_time, xx11_silv_start_time, units = c("mins")) %>% 
+          as.numeric()
+        , timer_total_time_mins = difftime(xx86_end_time, xx1_tile_start_time, units = c("mins")) %>% 
+          as.numeric()
+        # settings
+        , sttng_input_las_dir = input_las_dir
+        , sttng_use_parallel_processing = as.character(use_parallel_processing)
+        , sttng_desired_chm_res = desired_chm_res
+        , sttng_max_height_threshold_m = max_height_threshold_m
+        , sttng_minimum_tree_height_m = minimum_tree_height_m
+        , sttng_dbh_max_size_m = dbh_max_size_m
+        , sttng_local_dbh_model = ifelse(local_dbh_model == "rf", local_dbh_model, "lin")
+        , sttng_user_supplied_epsg = as.character(user_supplied_epsg)
+        , sttng_las_grid_res_m = las_grid_res_m
+        , sttng_las_grid_buff_m = las_grid_buff_m
+        , sttng_competition_buffer_m = competition_buffer_m
+      )
+
+  # write 
+  write.csv(
+    return_df
+    , paste0(config$delivery_dir, "/processed_tracking_data.csv")
+    , row.names = F
+  )
     

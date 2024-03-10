@@ -147,7 +147,11 @@ las_ctg_dta = sf::st_read(paste0(delivery_dir, "/raw_las_ctg_info.gpkg"))
       , mapping = aes(x=x,y=y,fill=f)
     ) +
     geom_sf(
-      data = treetops_sf_with_dbh
+      data = crowns_sf_with_dbh %>% 
+          sf::st_drop_geometry() %>% 
+          dplyr::filter(tree_height_m >= 2) %>% 
+          sf::st_as_sf(coords = c("tree_x", "tree_y"), crs = sf::st_crs(crowns_sf_with_dbh))
+      # data = treetops_sf_with_dbh
       # , size = 0.3
       , shape = "."
     ) +
@@ -155,20 +159,20 @@ las_ctg_dta = sf::st_read(paste0(delivery_dir, "/raw_las_ctg_info.gpkg"))
     scale_fill_viridis_c(option = "plasma") +
     labs(
       fill="canopy\nht (m)"
-      , title = "BHEF Units 1-4 UAS Flights 2023-06"
+      , title = "Lower Sherwin UAS Flights"
     ) +  
     theme_light() +
     theme(
       # legend.position =  "top"
       # , legend.direction = "horizontal"
       legend.title = element_text(size = 8, face = "bold")
-      , legend.margin = margin(c(0,0,0,0))
+      # , legend.margin = margin(c(0,0,0,0))
       , plot.title = element_text(size = 10, face = "bold") #, hjust = 0.5
       , axis.title = element_blank()
       , axis.text = element_blank()
       , axis.ticks = element_blank()
       , panel.grid = element_blank()
-      , plot.margin = margin(0, 0, 0, 0, "cm")
+      # , plot.margin = margin(0, 0, 0, 0, "cm")
       , plot.caption = element_text(color = "black", hjust = 0, vjust = 3)
     )
   ggplot2::ggsave(
