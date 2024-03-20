@@ -1,3 +1,232 @@
+################################################################################
+################################################################################
+################################################################################
+### 2024-03-18 lasR 0.3.2 updates
+################################################################################
+################################################################################
+################################################################################
+######################################
+# DEFINE ALL lasR pipeline steps
+######################################
+
+########## !!!!!!!!!!!!!!!!! run point_cloud_processing.r to line 328...thru: 
+ ## las_ctg = lidR::readLAScatalog(config$input_las_dir)
+
+xxst_time = Sys.time()
+
+###################
+# classify
+###################
+## !!!!!!!!!!!!!!!! using lasR, but NOT using lasR...
+  # Classify pipelines use lasR::callback() that exposes the point cloud as a data.frame. 
+  # One of the reasons why lasR is more memory-efficient and faster than lidR is that it 
+  # does not expose the point cloud as a data.frame. Thus, these pipelines are not very different 
+  # from the lidR::classify_ground() function in lidR. 
+  # The advantage of using lasR here is the ability to pipe different stages.
+  # There is no function in lasR to classify the points...create one
+  lasr_classify = function(
+    # csf options
+    smooth = FALSE, threshold = 0.5
+    , resolution = 0.5, rigidness = 1L
+    , iterations = 500L, step = 0.65
+  ){
+    csf = function(data, smooth, threshold, resolution, rigidness, iterations, step)
+    {
+      id = RCSF::CSF(data, smooth, threshold, resolution, rigidness, iterations, step)
+      class = integer(nrow(data))
+      class[id] = 2L
+      data$Classification <- class
+      return(data)
+    }
+    
+    classify = lasR::callback(
+      csf
+      , expose = "xyz"
+      # csf options
+      , smooth = smooth, threshold = threshold
+      , resolution = resolution, rigidness = rigidness
+      , iterations = iterations, step = step
+    )
+    return(classify)
+  }
+  
+  # ###########
+  # # to run separately and get output
+  # ###########
+  #   if(keep_intermediate_files == T){
+  #     # write step
+  #     lasr_write_temp = lasR::write_las(
+  #         ofile = paste0(config$las_classify_dir, "/*_classify.las")
+  #         , filter = "-drop_noise -drop_duplicates"
+  #         , keep_buffer = T
+  #       )
+  #     # pipeline
+  #     lasr_pipeline_temp = lasr_classify() + lasr_write_temp
+  #     # execute
+  #     las_denoise_flist = lasR::exec(
+  #       lasr_pipeline_temp
+  #       , on = las_ctg
+  #       , ncores = (lasR::ncores()-1)
+  #       , buffer = 10
+  #       , chunk = 100
+  #     )
+  #     # create spatial index files (.lax)
+  #     create_lax_for_tiles(
+  #       list.files(config$las_classify_dir, pattern = ".*\\.(laz|las)$", full.names = T)
+  #     )
+  #   }
+  
+  # clean up
+  remove(list = ls()[grep("_temp",ls())])
+  gc()
+
+###################
+# denoise
+###################
+  lasr_denoise = lasR::classify_isolated_points(res =  5, n = 6)
+  lasr_denoise_filter = lasR::delete_points(filter = "-drop_noise -drop_duplicates")
+  
+  # ###########
+  # # to run separately and get output
+  # ###########
+  #   if(keep_intermediate_files == T){
+  #     # write step
+  #     lasr_write_temp = lasR::write_las(
+  #         ofile = paste0(config$las_denoise_dir, "/*_denoise.las")
+  #         , filter = "-drop_noise -drop_duplicates"
+  #         , keep_buffer = T
+  #       )
+  #     # pipeline
+  #     lasr_pipeline_temp = lasr_classify() + lasr_denoise + lasr_denoise_filter + lasr_write_temp
+  #     # execute
+  #     las_denoise_flist = lasR::exec(
+  #       lasr_pipeline_temp
+  #       , on = las_ctg
+  #       , ncores = (lasR::ncores()-1)
+  #       , buffer = 10
+  #       , chunk = 100
+  #     )
+  #     # create spatial index files (.lax)
+  #     create_lax_for_tiles(
+  #       list.files(config$las_denoise_dir, pattern = ".*\\.(laz|las)$", full.names = T)
+  #     )
+  #   }
+
+  # clean up
+  remove(list = ls()[grep("_temp",ls())])
+  gc()
+  
+###################
+# dtm + normalize + chm
+###################
+  # file name for write
+    dtm_file_name = paste0(config$delivery_dir, "/dtm_", desired_dtm_res, "m.tif")
+  # file name for write
+    chm_file_name = paste0(config$delivery_dir, "/chm_", desired_chm_res, "m.tif")
+  
+  ## lasR steps
+  # perform Delaunay triangulation
+    lasr_dtm_triangulate = lasR::triangulate(
+      filter = lasR::keep_ground() + lasR::keep_class(c(9))
+    )
+  # rasterize the result of the Delaunay triangulation
+    lasr_dtm = lasR::rasterize(res = desired_dtm_res, lasr_dtm_triangulate)
+  # # Pits and spikes filling for raster with algorithm from St-Onge 2008 (see reference).
+    lasr_dtm_pitfill = lasR::pit_fill(raster = lasr_dtm, ofile = dtm_file_name)
+  # normalize
+    lasr_normalize = lasR::transform_with(lasr_dtm_triangulate, operator = "-")
+  # write
+    lasr_write_normalize = lasR::write_las(
+      filter = "-drop_z_below 0"
+      , ofile = paste0(config$las_normalize_dir, "/*_normalize.las")
+      , keep_buffer = T
+    )
+  # chm
+    #set up chm pipeline step
+    # operators = "max" is analogous to `lidR::rasterize_canopy(algorithm = p2r())`
+    # for each pixel of the output raster the function attributes the height of the highest point found
+    lasr_chm = lasR::rasterize(
+      res = desired_chm_res
+      , operators = "max"
+      , filter = paste0(
+        "-drop_class 2 9 -drop_z_below "
+        , minimum_tree_height_m
+        , " -drop_z_above "
+        , max_height_threshold_m
+      )
+    )
+  # Pits and spikes filling for raster with algorithm from St-Onge 2008 (see reference).
+    lasr_chm_pitfill = lasR::pit_fill(raster = lasr_chm, ofile = chm_file_name)
+  
+
+  ###########
+  # to run separately and get output
+  ###########
+    # if(keep_intermediate_files == T){
+    if(T){
+      # pipeline
+      lasr_pipeline_temp = lasr_classify() + lasr_denoise + lasr_denoise_filter +
+        lasr_dtm_triangulate + lasr_dtm + lasr_dtm_pitfill +
+        lasr_normalize + lasr_write_normalize +
+        lasr_chm + lasr_chm_pitfill
+      # execute
+      las_dtm_ans = lasR::exec(
+        lasr_pipeline_temp
+        # , on = list.files(config$input_las_dir, pattern = ".*\\.(laz|las)$", full.names = T)
+        , on = las_ctg
+        , ncores = (parallel::detectCores()-1)
+        , buffer = 10
+        , chunk = 100
+      )
+    }
+
+  # clean up
+    remove(list = ls()[grep("_temp",ls())])
+    gc()
+
+  message("total time to process was "
+          , difftime(Sys.time(), xxst_time, units = c("mins")) %>% as.numeric()
+          , "mins"
+        )
+
+las_dtm_ans[[length(las_dtm_ans)]] %>% 
+  terra::plot()
+  
+
+###################################
+# lasR cleanup
+###################################
+  # las_dtm_ans %>% str()
+  # las_dtm_ans$pit_fill %>% terra::plot()
+  # las_dtm_ans$pit_fill %>% terra::crs()
+  
+  # fill dtm cells that are missing still with the mean of a window
+    dtm_rast = terra::rast(dtm_file_name) %>%
+      terra::focal(
+        w = 3
+        , fun = "mean"
+        , na.rm = T
+        # na.policy Must be one of:
+          # "all" (compute for all cells)
+          # , "only" (only for cells that are NA)
+          # , or "omit" (skip cells that are NA).
+        , na.policy = "only"
+      )
+    # dtm_rast %>% terra::crs()
+    # dtm_rast %>% terra::plot()
+    
+  # write to delivery directory
+    terra::writeRaster(
+      dtm_rast
+      , filename = dtm_file_name
+      , overwrite = T
+    )
+      
+    # clean up
+    remove(list = ls()[grep("_temp",ls())])
+    gc()
+
+
 #################################################################################
 #################################################################################
 # Height normalize points and create canopy height model (CHM) raster

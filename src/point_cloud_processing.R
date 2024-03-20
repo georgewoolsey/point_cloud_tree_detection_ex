@@ -65,13 +65,19 @@
   ###_________________________###
   # !!!!!!!!!! ENSURE FILES ARE PROJECTED IN CRS THAT USES METRE AS MEASURMENT UNIT
   # input_las_dir = "../data/testtest"
-  input_las_dir = "../data/lower_sherwin"
+  input_las_dir = "../data/testtest"
   
   ###_________________________###
   ### Set input TreeMap directory ###
   ###_________________________###
   # input_treemap_dir = "../data/treemap"
   input_treemap_dir = "../data/treemap"
+  
+  ###_________________________###
+  ### Set the desired raster resolution in metres for the digital terrain model
+  ###_________________________###
+  # desired_dtm_res = 0.25
+  desired_dtm_res = 1
   
   ###_________________________###
   ### Set the desired raster resolution in metres for the canopy height model
@@ -589,7 +595,7 @@ if(
 # check file lists
 ###______________________________###
   # rasters
-  dtm_file_name = paste0(config$delivery_dir, "/dtm_1m.tif")
+  dtm_file_name = paste0(config$delivery_dir, "/dtm_", desired_dtm_res, "m.tif")
 # execute if
 if(
   file.exists(dtm_file_name) == F
@@ -639,9 +645,9 @@ if(
       # these files will be used to mosaic over full extent
     las_dtm_flist = lasr_dtm_pipeline(
       files = list.files(config$las_classify_dir, pattern = ".*_classify\\.(laz|las)$", full.names = T)
-      # , ofile = paste0(config$dtm_dir, "/*_dtm_1m.tif")
-      , ofile = ""
-      , res = 1
+      , ofile = paste0(config$dtm_dir, "/*_dtm_", desired_dtm_res, "m.tif")
+      # , ofile = ""
+      , res = desired_dtm_res
       , max_edge = c(0,1)
       , add_class = 9 # include water in dtm
     )
