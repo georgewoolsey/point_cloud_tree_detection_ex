@@ -49,98 +49,48 @@ xxst_time = Sys.time()
     )
     return(classify)
   }
-  
-  # ###########
-  # # to run separately and get output
-  # ###########
-  #   if(keep_intermediate_files == T){
-  #     # write step
-  #     lasr_write_temp = lasR::write_las(
-  #         ofile = paste0(config$las_classify_dir, "/*_classify.las")
-  #         , filter = "-drop_noise -drop_duplicates"
-  #         , keep_buffer = T
-  #       )
-  #     # pipeline
-  #     lasr_pipeline_temp = lasr_classify() + lasr_write_temp
-  #     # execute
-  #     las_denoise_flist = lasR::exec(
-  #       lasr_pipeline_temp
-  #       , on = las_ctg
-  #       , ncores = (lasR::ncores()-1)
-  #       , buffer = 10
-  #       , chunk = 100
-  #     )
-  #     # create spatial index files (.lax)
-  #     create_lax_for_tiles(
-  #       list.files(config$las_classify_dir, pattern = ".*\\.(laz|las)$", full.names = T)
-  #     )
-  #   }
-  
-  # clean up
-  remove(list = ls()[grep("_temp",ls())])
-  gc()
 
 ###################
 # denoise
 ###################
+  # classify isolated points
   lasr_denoise = lasR::classify_isolated_points(res =  5, n = 6)
   lasr_denoise_filter = lasR::delete_points(filter = "-drop_noise -drop_duplicates")
   
-  # ###########
-  # # to run separately and get output
-  # ###########
-  #   if(keep_intermediate_files == T){
-  #     # write step
-  #     lasr_write_temp = lasR::write_las(
-  #         ofile = paste0(config$las_denoise_dir, "/*_denoise.las")
-  #         , filter = "-drop_noise -drop_duplicates"
-  #         , keep_buffer = T
-  #       )
-  #     # pipeline
-  #     lasr_pipeline_temp = lasr_classify() + lasr_denoise + lasr_denoise_filter + lasr_write_temp
-  #     # execute
-  #     las_denoise_flist = lasR::exec(
-  #       lasr_pipeline_temp
-  #       , on = las_ctg
-  #       , ncores = (lasR::ncores()-1)
-  #       , buffer = 10
-  #       , chunk = 100
-  #     )
-  #     # create spatial index files (.lax)
-  #     create_lax_for_tiles(
-  #       list.files(config$las_denoise_dir, pattern = ".*\\.(laz|las)$", full.names = T)
-  #     )
-  #   }
-
-  # clean up
-  remove(list = ls()[grep("_temp",ls())])
-  gc()
-  
 ###################
-# dtm + normalize + chm
+# dtm
 ###################
   # file name for write
     dtm_file_name = paste0(config$delivery_dir, "/dtm_", desired_dtm_res, "m.tif")
-  # file name for write
-    chm_file_name = paste0(config$delivery_dir, "/chm_", desired_chm_res, "m.tif")
-  
-  ## lasR steps
   # perform Delaunay triangulation
-    lasr_dtm_triangulate = lasR::triangulate(
+    lasr_triangulate = lasR::triangulate(
+      # class 2 = ground; class 9 = water
       filter = lasR::keep_ground() + lasR::keep_class(c(9))
     )
   # rasterize the result of the Delaunay triangulation
-    lasr_dtm = lasR::rasterize(res = desired_dtm_res, lasr_dtm_triangulate)
+    lasr_dtm = lasR::rasterize(res = desired_dtm_res, lasr_triangulate)
   # # Pits and spikes filling for raster with algorithm from St-Onge 2008 (see reference).
     lasr_dtm_pitfill = lasR::pit_fill(raster = lasr_dtm, ofile = dtm_file_name)
+    # lasr_dtm_pitfill = lasR::pit_fill(raster = lasr_dtm, ofile = paste0(config$dtm_dir, "/*_dtm.tif"))
+
+###################
+# normalize
+###################
   # normalize
-    lasr_normalize = lasR::transform_with(lasr_dtm_triangulate, operator = "-")
+    lasr_normalize = lasR::transform_with(lasr_triangulate, operator = "-")
   # write
     lasr_write_normalize = lasR::write_las(
       filter = "-drop_z_below 0"
       , ofile = paste0(config$las_normalize_dir, "/*_normalize.las")
-      , keep_buffer = T
+      , keep_buffer = F
     )
+
+###################
+# chm
+###################
+  # file name for write
+    chm_file_name = paste0(config$delivery_dir, "/chm_", desired_chm_res, "m.tif")
+
   # chm
     #set up chm pipeline step
     # operators = "max" is analogous to `lidR::rasterize_canopy(algorithm = p2r())`
@@ -157,51 +107,102 @@ xxst_time = Sys.time()
     )
   # Pits and spikes filling for raster with algorithm from St-Onge 2008 (see reference).
     lasr_chm_pitfill = lasR::pit_fill(raster = lasr_chm, ofile = chm_file_name)
+    # lasr_chm_pitfill = lasR::pit_fill(raster = lasr_chm, ofile = paste0(config$chm_dir, "/*_chm.tif"))
   
-
-  ###########
-  # to run separately and get output
-  ###########
-    # if(keep_intermediate_files == T){
-    if(T){
-      # pipeline
+###################################
+# lasR full pipeline
+###################################
+  if(keep_intermediate_files == T){
+    # set up intermediate file write steps
+      # classify write step
+      lasr_write_classify = lasR::write_las(
+          ofile = paste0(config$las_classify_dir, "/*_classify.las")
+          , filter = "-drop_noise -drop_duplicates"
+          , keep_buffer = F
+        )
+    # pipeline
       lasr_pipeline_temp = lasr_classify() + lasr_denoise + lasr_denoise_filter +
-        lasr_dtm_triangulate + lasr_dtm + lasr_dtm_pitfill +
+        lasr_write_classify + 
+        lasr_triangulate +
+        lasr_dtm + lasr_dtm_pitfill +
         lasr_normalize + lasr_write_normalize +
         lasr_chm + lasr_chm_pitfill
-      # execute
-      las_dtm_ans = lasR::exec(
-        lasr_pipeline_temp
-        # , on = list.files(config$input_las_dir, pattern = ".*\\.(laz|las)$", full.names = T)
-        , on = las_ctg
-        , ncores = (parallel::detectCores()-1)
-        , buffer = 10
-        , chunk = 100
-      )
-    }
-
+  }else{
+    # pipeline
+      lasr_pipeline_temp = lasr_classify() + lasr_denoise + lasr_denoise_filter +
+        lasr_triangulate + 
+        lasr_dtm + lasr_dtm_pitfill +
+        lasr_normalize + lasr_write_normalize +
+        lasr_chm + lasr_chm_pitfill
+  }
+  
+  # retile catalog to get around lasR not working on overlapping or adjacent tiles
+    # create one big a$$ las file even though this is probs bad practice
+    # ... it's the only way this lasR workflow works with raw las's that are tiled overlapping or adjacent
+  ctg_retile = function(ctg, size, buffer, name = NULL){
+    lidR::opt_progress(ctg) = F
+    lidR::opt_output_files(ctg) = paste0(config$las_grid_dir,"/", name, "_{XLEFT}_{YBOTTOM}") # label outputs based on coordinates
+    lidR::opt_chunk_buffer(ctg) = buffer
+    lidR::opt_chunk_size(ctg) = size # retile
+    ctg_small = lidR::catalog_retile(ctg) # apply retile  
+    return(ctg_small)
+  }
+  # make this into one big las file
+  big_grid = ctg_retile(
+    ctg = las_ctg
+    , size = las_ctg@data$geometry %>%
+        sf::st_union() %>%
+        sf::st_bbox() %>%
+        sf::st_as_sfc() %>%
+        sf::st_area() %>%
+        as.numeric() %>% 
+        `*`(1.1) %>% 
+        round()
+    , buffer = 0 # leave this as 0 for srs, processing buffer is set in lasR::exec
+    , name = "big_grid"
+  )
+  # reset grid and buffer to use whatever is passed to lasR::exec
+  lidR::opt_chunk_size(big_grid) = 0
+  lidR::opt_chunk_buffer(big_grid) = 30
+  lidR::opt_progress(big_grid) = T
+  
+  # execute
+    lasr_ans = lasR::exec(
+      lasr_pipeline_temp
+      , ncores = (parallel::detectCores()-1)
+      # , on = list.files(config$input_las_dir, pattern = ".*\\.(laz|las)$", full.names = T)
+      # , on = las_ctg
+      , on = big_grid
+      , buffer = las_grid_buff_m # 10
+      , chunk = las_grid_res_m # 100
+    )
   # clean up
     remove(list = ls()[grep("_temp",ls())])
     gc()
 
-  message("total time to process was "
-          , difftime(Sys.time(), xxst_time, units = c("mins")) %>% as.numeric()
-          , "mins"
-        )
-
-las_dtm_ans[[length(las_dtm_ans)]] %>% 
-  terra::plot()
-  
-
 ###################################
-# lasR cleanup
+# lasR cleanup and polish
 ###################################
-  # las_dtm_ans %>% str()
-  # las_dtm_ans$pit_fill %>% terra::plot()
-  # las_dtm_ans$pit_fill %>% terra::crs()
+  # lasr_ans %>% str()
+  # lasr_ans$pit_fill %>% terra::plot()
+  # lasr_ans$pit_fill %>% terra::crs()
+  # lasr_ans[[length(lasr_ans)]] %>% terra::plot()
   
   # fill dtm cells that are missing still with the mean of a window
-    dtm_rast = terra::rast(dtm_file_name) %>%
+    dtm_rast = terra::rast(dtm_file_name)
+    dtm_rast = dtm_rast %>%
+      terra::crop(
+        las_ctg@data$geometry %>% 
+          sf::st_union() %>% 
+          terra::vect() %>% 
+          terra::project(terra::crs(dtm_rast))
+      ) %>% 
+      terra::mask(
+        las_ctg@data$geometry %>% 
+          sf::st_union() %>% 
+          terra::vect() %>% 
+          terra::project(terra::crs(dtm_rast))
+      ) %>% 
       terra::focal(
         w = 3
         , fun = "mean"
@@ -221,12 +222,78 @@ las_dtm_ans[[length(las_dtm_ans)]] %>%
       , filename = dtm_file_name
       , overwrite = T
     )
-      
-    # clean up
+  
+  # fill chm cells that are missing still with the mean of a window
+    chm_rast = terra::rast(chm_file_name)
+    chm_rast = chm_rast %>%
+      terra::crop(
+        las_ctg@data$geometry %>% 
+          sf::st_union() %>% 
+          terra::vect() %>% 
+          terra::project(terra::crs(chm_rast))
+      ) %>% 
+      terra::mask(
+        las_ctg@data$geometry %>% 
+          sf::st_union() %>% 
+          terra::vect() %>% 
+          terra::project(terra::crs(chm_rast))
+      ) %>% 
+      terra::focal(
+        w = 3
+        , fun = "mean"
+        , na.rm = T
+        # na.policy Must be one of:
+          # "all" (compute for all cells)
+          # , "only" (only for cells that are NA)
+          # , or "omit" (skip cells that are NA).
+        , na.policy = "only"
+      )
+    # chm_rast %>% terra::crs()
+    # chm_rast %>% terra::plot()
+    
+  # write to delivery directory
+    terra::writeRaster(
+      chm_rast
+      , filename = chm_file_name
+      , overwrite = T
+    )
+  
+  # create spatial index files (.lax)
+    # normalize
+    create_lax_for_tiles(
+      las_file_list = list.files(config$las_normalize_dir, pattern = ".*\\.(laz|las)$", full.names = T)
+    )
+    # classify
+    create_lax_for_tiles(
+      las_file_list = list.files(config$las_classify_dir, pattern = ".*\\.(laz|las)$", full.names = T)
+    )
+  
+  # clean up
     remove(list = ls()[grep("_temp",ls())])
+    # remove(lasr_ans)
     gc()
 
-
+  message("total time to process was "
+          , difftime(Sys.time(), xxst_time, units = c("mins")) %>% as.numeric()
+          , "mins"
+        )
+  
+dtm_rast %>% 
+  as.data.frame(xy = T) %>% 
+  dplyr::rename(f=3) %>% 
+  ggplot() +
+    geom_tile(aes(x=x,y=y,fill=f)) +
+    geom_sf(data = las_ctg@data$geometry, fill = NA) +
+    scale_fill_viridis_c(option = "viridis") +
+    theme_void()
+chm_rast %>% 
+  as.data.frame(xy = T) %>% 
+  dplyr::rename(f=3) %>% 
+  ggplot() +
+    geom_tile(aes(x=x,y=y,fill=f)) +
+    geom_sf(data = las_ctg@data$geometry, fill = NA) +
+    scale_fill_viridis_c(option = "plasma") +
+    theme_void()
 #################################################################################
 #################################################################################
 # Height normalize points and create canopy height model (CHM) raster

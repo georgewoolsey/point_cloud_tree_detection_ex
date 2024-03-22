@@ -9,14 +9,25 @@
 ## .... during the normalize step, suggests corrupted las file
 ## POTENTIAL FIX IS:
 ## !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! ##
-  # las = rlas::read.las("c:/data/pre_RGB_clipped.las")
+  # get the raw las file and header information
+  # las_fnm = "C:/data/one_post_clipped.las"
+  # las = rlas::read.las(las_fnm)
+  # las_header = rlas::read.lasheader(las_fnm)
+  # las_epsg = rlas::header_get_epsg(las_header)
+  # las_wktcs = rlas::header_get_wktcs(las_header)
   # str(las)
+  # # update the raw las files to fix data causing issues
   # las$gpstime = 0
   # las$NIR = NULL
   # str(las)
+  # # create new las header
+  # new_las_header = rlas::header_create(las)
+  # new_las_header = rlas::header_set_epsg(new_las_header, las_epsg)
+  # new_las_header = rlas::header_set_wktcs(new_las_header, las_wktcs)
+  # # write
   # rlas::write.las(
-  #   file = "c:/data/pre_RGB_clipped_FIXED.las"
-  #   , header = rlas::header_create(las)
+  #   file = "C:/data/one_post_clipped_FIXED.las"
+  #   , header = new_las_header
   #   , data = las
   # )
 ## !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! ##
@@ -45,14 +56,14 @@
   ### keep those intermediate files (classfied, normalized, stem las files)
   ###____________________###
   # keep_intermediate_files = F
-  keep_intermediate_files = F
+  keep_intermediate_files = T
   
   ###____________________###
   ### use parallel processing? (T/F) ###
   ### parallel processing may not work on all machines ###
   ###____________________###
-  # use_parallel_processing = F
-  use_parallel_processing = T
+  use_parallel_processing = F
+  # use_parallel_processing = T
   
   ###____________________###
   ### Set directory for outputs ###
@@ -76,7 +87,7 @@
   ###_________________________###
   ### Set the desired raster resolution in metres for the digital terrain model
   ###_________________________###
-  # desired_dtm_res = 0.25
+  # desired_dtm_res = 1
   desired_dtm_res = 1
   
   ###_________________________###
@@ -100,7 +111,7 @@
   ###_________________________###
   ### Set the maximum dbh size (meters)
   ###_________________________###
-  # dbh_max_size_m = 1
+  # dbh_max_size_m = 10
   dbh_max_size_m = 7
   
   ###_________________________###
@@ -125,10 +136,10 @@
   ### gridded las tiles are used to process data in chuncks
   ### if point density is very high, set grid res to 40-70
   ###_________________________###
-  # las_grid_res_m = 62
-  # las_grid_buff_m = 6
-  las_grid_res_m = 62
-  las_grid_buff_m = 6
+  # las_grid_res_m = 100
+  # las_grid_buff_m = 10
+  las_grid_res_m = 100
+  las_grid_buff_m = 10
   
 #################################################################################
 #################################################################################
