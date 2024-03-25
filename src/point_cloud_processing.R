@@ -9,7 +9,7 @@
 ## .... during the normalize step, suggests corrupted las file
 ## POTENTIAL FIX IS:
 ## !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! ##
-  # get the raw las file and header information
+  # # get the raw las file and header information
   # las_fnm = "C:/data/one_post_clipped.las"
   # las = rlas::read.las(las_fnm)
   # las_header = rlas::read.lasheader(las_fnm)
@@ -75,8 +75,8 @@
   ### Set input las directory ###
   ###_________________________###
   # !!!!!!!!!! ENSURE FILES ARE PROJECTED IN CRS THAT USES METRE AS MEASURMENT UNIT
-  # input_las_dir = "../data/testtest"
   input_las_dir = "../data/testtest"
+  # input_las_dir = "../data/lower_sherwin_clip"
   
   ###_________________________###
   ### Set input TreeMap directory ###
