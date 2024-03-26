@@ -20,195 +20,10 @@ list.files(config$delivery_dir, recursive = T, full.names = T) %>%
 
 xxst_time = Sys.time()
 
-###################
-# read with filter
-###################
-  lasr_read = lasR::reader_las(filter = "-drop_duplicates")
-  # lasr_read = lasR::reader_las()
-###################
-# classify
-###################
-## !!!!!!!!!!!!!!!! using lasR, but NOT using lasR...
-  # Classify pipelines use lasR::callback() that exposes the point cloud as a data.frame. 
-  # One of the reasons why lasR is more memory-efficient and faster than lidR is that it 
-  # does not expose the point cloud as a data.frame. Thus, these pipelines are not very different 
-  # from the lidR::classify_ground() function in lidR. 
-  # The advantage of using lasR here is the ability to pipe different stages.
-  # There is no function in lasR to classify the points...create one
-  lasr_classify = function(
-    # csf options
-    smooth = FALSE, threshold = 0.5
-    , resolution = 0.5, rigidness = 1L
-    , iterations = 500L, step = 0.65
-  ){
-    csf = function(data, smooth, threshold, resolution, rigidness, iterations, step)
-    {
-      id = RCSF::CSF(data, smooth, threshold, resolution, rigidness, iterations, step)
-      class = integer(nrow(data))
-      class[id] = 2L
-      data$Classification <- class
-      return(data)
-    }
-    
-    classify = lasR::callback(
-      csf
-      , expose = "xyz"
-      # csf options
-      , smooth = smooth, threshold = threshold
-      , resolution = resolution, rigidness = rigidness
-      , iterations = iterations, step = step
-    )
-    return(classify)
-  }
-
-###################
-# denoise
-###################
-  # classify isolated points
-  lasr_denoise = lasR::classify_isolated_points(res =  5, n = 6)
-  lasr_denoise_filter = lasR::delete_points(filter = lasR::drop_noise())
-  
-###################
-# dtm
-###################
-  # file name for write
-    dtm_file_name = paste0(config$delivery_dir, "/dtm_", desired_dtm_res, "m.tif")
-  # perform Delaunay triangulation
-    lasr_triangulate = lasR::triangulate(
-      # class 2 = ground; class 9 = water
-      filter = lasR::keep_ground() + lasR::keep_class(c(9))
-      , max_edge = c(0,1)
-      # # write to disk to preserve memory
-      # , ofile = paste0(config$las_denoise_dir, "/", "*_tri.gpkg")
-    )
-  # rasterize the result of the Delaunay triangulation
-    lasr_dtm = lasR::rasterize(
-      res = desired_dtm_res
-      , lasr_triangulate
-      # write to disk to preserve memory
-      , ofile = paste0(config$dtm_dir, "/", "*_dtm.tif")
-    )
-  # # Pits and spikes filling for raster with algorithm from St-Onge 2008 (see reference).
-    lasr_dtm_pitfill = lasR::pit_fill(raster = lasr_dtm, ofile = dtm_file_name)
-
-###################
-# normalize
-###################
-  # normalize
-    lasr_normalize = lasR::transform_with(lasr_triangulate, operator = "-")
-  # write
-    lasr_write_normalize = lasR::write_las(
-      filter = "-drop_z_below 0"
-      , ofile = paste0(config$las_normalize_dir, "/*_normalize.las")
-      , keep_buffer = T
-    )
-
-###################
-# chm
-###################
-  # file name for write
-    chm_file_name = paste0(config$delivery_dir, "/chm_", desired_chm_res, "m.tif")
-
-  # chm
-    #set up chm pipeline step
-    # operators = "max" is analogous to `lidR::rasterize_canopy(algorithm = p2r())`
-    # for each pixel of the output raster the function attributes the height of the highest point found
-    lasr_chm = lasR::rasterize(
-      res = desired_chm_res
-      , operators = "max"
-      , filter = paste0(
-        "-drop_class 2 9 -drop_z_below "
-        , minimum_tree_height_m
-        , " -drop_z_above "
-        , max_height_threshold_m
-      )
-      # write to disk to preserve memory
-      , ofile = paste0(config$chm_dir, "/", "*_chm.tif")
-    )
-  # Pits and spikes filling for raster with algorithm from St-Onge 2008 (see reference).
-    lasr_chm_pitfill = lasR::pit_fill(raster = lasr_chm, ofile = chm_file_name)
-  
-###################################
-# lasR full pipeline
-###################################
-  if(keep_intermediate_files == T){
-    # set up intermediate file write steps
-      # classify write step
-      lasr_write_classify = lasR::write_las(
-          ofile = paste0(config$las_classify_dir, "/*_classify.las")
-          , filter = "-drop_noise -drop_duplicates"
-          , keep_buffer = F
-        )
-    # pipeline
-      lasr_pipeline_temp = lasr_read +
-        lasr_classify() + lasr_denoise + lasr_denoise_filter +
-        lasr_write_classify + 
-        lasr_triangulate +
-        lasr_dtm + lasr_dtm_pitfill +
-        lasr_normalize + lasr_write_normalize +
-        lasr_chm + lasr_chm_pitfill
-  }else{
-    # pipeline
-      lasr_pipeline_temp = lasr_read +
-        lasr_classify() + lasr_denoise + lasr_denoise_filter +
-        lasr_triangulate + 
-        lasr_dtm + lasr_dtm_pitfill +
-        lasr_normalize + lasr_write_normalize +
-        lasr_chm + lasr_chm_pitfill
-  }
-  
-  # # retile catalog to get around lasR not working on overlapping or adjacent tiles
-  #   # create one big a$$ las file even though this is probs bad practice
-  #   # ... it's the only way this lasR workflow works with raw las's that are tiled overlapping or adjacent
-  # ctg_retile = function(ctg, size, buffer, name = NULL){
-  #   lidR::opt_progress(ctg) = F
-  #   lidR::opt_output_files(ctg) = paste0(config$las_grid_dir,"/", name, "_{XLEFT}_{YBOTTOM}") # label outputs based on coordinates
-  #   lidR::opt_chunk_buffer(ctg) = buffer
-  #   lidR::opt_chunk_size(ctg) = size # retile
-  #   ctg_small = lidR::catalog_retile(ctg) # apply retile
-  #   return(ctg_small)
-  # }
-  # # call retile function
-  # las_grid = ctg_retile(
-  #   ctg = las_ctg
-  #   # make this into small tiles
-  #   , size = 250
-  #   # # make this into one big las file ... this is a bad idea:
-  #   #   # https://gis.stackexchange.com/questions/439783/r-lidr-stitching-several-las-files-into-one
-  #   #     # "Merging 110 file into a single one is a bad idea in all aspect actually." – JRR
-  #   # , size = las_ctg@data$geometry %>%
-  #   #     sf::st_union() %>%
-  #   #     sf::st_bbox() %>%
-  #   #     sf::st_as_sfc() %>%
-  #   #     sf::st_area() %>%
-  #   #     as.numeric() %>%
-  #   #     `*`(1.1) %>%
-  #   #     round()
-  #   , buffer = 0 # leave this as 0 for srs, processing buffer is set in lasR::exec
-  #   , name = "las_grid"
-  # )
-  # # reset grid and buffer to use whatever is passed to lasR::exec
-  # lidR::opt_chunk_size(las_grid) = 0
-  # lidR::opt_chunk_buffer(las_grid) = 30
-  # lidR::opt_progress(las_grid) = T
-  
-  # norm_ctg_temp = lidR::readLAScatalog(config$input_las_dir)
-  # # retile catalog
-  # lidR::opt_progress(norm_ctg_temp) = F
-  # lidR::opt_output_files(norm_ctg_temp) = paste0(config$las_grid_dir,"/", "_{XLEFT}_{YBOTTOM}") # label outputs based on coordinates
-  # lidR::opt_chunk_buffer(norm_ctg_temp) = 0
-  # lidR::opt_chunk_size(norm_ctg_temp) = 400 # retile
-  # lidR::catalog_retile(norm_ctg_temp) # apply retile
-  # # create spatial index
-  # create_lax_for_tiles(
-  #   las_file_list = list.files(config$las_grid_dir, pattern = ".*\\.(laz|las)$", full.names = T)
-  # )
-  # # clean up
-  # remove(norm_ctg_temp)
-  # gc()
-  #   
-  
-  # define function to get chunk size based on sample data testing
+######################################
+# chunk for high density pt clouds
+######################################
+# define function to get chunk size based on sample data testing
   get_chunk_size_fn = function(ctg, max_pts_m2 = 1000){
     dta_sum = ctg@data %>%
       dplyr::mutate(
@@ -245,7 +60,148 @@ xxst_time = Sys.time()
   create_lax_for_tiles(
     las_file_list = list.files(config$las_grid_dir, pattern = ".*\\.(laz|las)$", full.names = T)
   )
+######################################
+# lasR steps
+######################################
+  ###################
+  # read with filter
+  ###################
+    lasr_read = lasR::reader_las(filter = "-drop_duplicates")
+    # lasr_read = lasR::reader_las()
+  ###################
+  # classify
+  ###################
+  ## !!!!!!!!!!!!!!!! using lasR, but NOT using lasR...
+    # Classify pipelines use lasR::callback() that exposes the point cloud as a data.frame. 
+    # One of the reasons why lasR is more memory-efficient and faster than lidR is that it 
+    # does not expose the point cloud as a data.frame. Thus, these pipelines are not very different 
+    # from the lidR::classify_ground() function in lidR. 
+    # The advantage of using lasR here is the ability to pipe different stages.
+    # There is no function in lasR to classify the points...create one
+    lasr_classify = function(
+      # csf options
+      smooth = FALSE, threshold = 0.5
+      , resolution = 0.5, rigidness = 1L
+      , iterations = 500L, step = 0.65
+    ){
+      csf = function(data, smooth, threshold, resolution, rigidness, iterations, step)
+      {
+        id = RCSF::CSF(data, smooth, threshold, resolution, rigidness, iterations, step)
+        class = integer(nrow(data))
+        class[id] = 2L
+        data$Classification <- class
+        return(data)
+      }
+      
+      classify = lasR::callback(
+        csf
+        , expose = "xyz"
+        # csf options
+        , smooth = smooth, threshold = threshold
+        , resolution = resolution, rigidness = rigidness
+        , iterations = iterations, step = step
+      )
+      return(classify)
+    }
   
+  ###################
+  # denoise
+  ###################
+    # classify isolated points
+    lasr_denoise = lasR::classify_isolated_points(res =  5, n = 6)
+    lasr_denoise_filter = lasR::delete_points(filter = lasR::drop_noise())
+    
+  ###################
+  # dtm
+  ###################
+    # file name for write
+      dtm_file_name = paste0(config$delivery_dir, "/dtm_", desired_dtm_res, "m.tif")
+    # perform Delaunay triangulation
+      lasr_triangulate = lasR::triangulate(
+        # class 2 = ground; class 9 = water
+        filter = lasR::keep_ground() + lasR::keep_class(c(9))
+        , max_edge = c(0,1)
+        # # write to disk to preserve memory
+        # , ofile = paste0(config$las_denoise_dir, "/", "*_tri.gpkg")
+      )
+    # rasterize the result of the Delaunay triangulation
+      lasr_dtm = lasR::rasterize(
+        res = desired_dtm_res
+        , lasr_triangulate
+        # write to disk to preserve memory
+        # , ofile = paste0(config$dtm_dir, "/", "*_dtm.tif")
+      )
+    # # Pits and spikes filling for raster with algorithm from St-Onge 2008 (see reference).
+      lasr_dtm_pitfill = lasR::pit_fill(raster = lasr_dtm, ofile = dtm_file_name)
+  
+  ###################
+  # normalize
+  ###################
+    # normalize
+      lasr_normalize = lasR::transform_with(lasr_triangulate, operator = "-")
+    # write
+      lasr_write_normalize = lasR::write_las(
+        filter = "-drop_z_below 0"
+        , ofile = paste0(config$las_normalize_dir, "/*_normalize.las")
+        , keep_buffer = T
+      )
+  
+  ###################
+  # chm
+  ###################
+    # file name for write
+      chm_file_name = paste0(config$delivery_dir, "/chm_", desired_chm_res, "m.tif")
+  
+    # chm
+      #set up chm pipeline step
+      # operators = "max" is analogous to `lidR::rasterize_canopy(algorithm = p2r())`
+      # for each pixel of the output raster the function attributes the height of the highest point found
+      lasr_chm = lasR::rasterize(
+        res = desired_chm_res
+        , operators = "max"
+        , filter = paste0(
+          "-drop_class 2 9 -drop_z_below "
+          , minimum_tree_height_m
+          , " -drop_z_above "
+          , max_height_threshold_m
+        )
+        # write to disk to preserve memory
+        # , ofile = paste0(config$chm_dir, "/", "*_chm.tif")
+      )
+    # Pits and spikes filling for raster with algorithm from St-Onge 2008 (see reference).
+      lasr_chm_pitfill = lasR::pit_fill(raster = lasr_chm, ofile = chm_file_name)
+
+######################################
+# lasR full pipeline
+######################################
+  if(keep_intermediate_files == T){
+    # set up intermediate file write steps
+      # classify write step
+      lasr_write_classify = lasR::write_las(
+          ofile = paste0(config$las_classify_dir, "/*_classify.las")
+          , filter = "-drop_noise -drop_duplicates"
+          , keep_buffer = F
+        )
+    # pipeline
+      lasr_pipeline_temp = lasr_read +
+        lasr_classify() + lasr_denoise + lasr_denoise_filter +
+        lasr_write_classify + 
+        lasr_triangulate +
+        lasr_dtm + lasr_dtm_pitfill +
+        lasr_normalize + lasr_write_normalize +
+        lasr_chm + lasr_chm_pitfill
+  }else{
+    # pipeline
+      lasr_pipeline_temp = lasr_read +
+        lasr_classify() + lasr_denoise + lasr_denoise_filter +
+        lasr_triangulate + 
+        lasr_dtm + lasr_dtm_pitfill +
+        lasr_normalize + lasr_write_normalize +
+        lasr_chm + lasr_chm_pitfill
+  }
+######################################
+# execute pipeline
+######################################
   message(
     "starting lasR processing with a chunk size of "
     , lidR::opt_chunk_size(las_ctg)
