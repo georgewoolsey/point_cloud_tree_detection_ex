@@ -21,6 +21,11 @@ list.files(config$delivery_dir, recursive = T, full.names = T) %>%
 xxst_time = Sys.time()
 
 ###################
+# read with filter
+###################
+  lasr_read = lasR::reader_las(filter = "-drop_duplicates")
+  # lasr_read = lasR::reader_las()
+###################
 # classify
 ###################
 ## !!!!!!!!!!!!!!!! using lasR, but NOT using lasR...
@@ -72,6 +77,9 @@ xxst_time = Sys.time()
     lasr_triangulate = lasR::triangulate(
       # class 2 = ground; class 9 = water
       filter = lasR::keep_ground() + lasR::keep_class(c(9))
+      , max_edge = c(0,1)
+      # # write to disk to preserve memory
+      # , ofile = paste0(config$las_denoise_dir, "/", "*_tri.gpkg")
     )
   # rasterize the result of the Delaunay triangulation
     lasr_dtm = lasR::rasterize(
@@ -132,7 +140,8 @@ xxst_time = Sys.time()
           , keep_buffer = F
         )
     # pipeline
-      lasr_pipeline_temp = lasr_classify() + lasr_denoise + lasr_denoise_filter +
+      lasr_pipeline_temp = lasr_read +
+        lasr_classify() + lasr_denoise + lasr_denoise_filter +
         lasr_write_classify + 
         lasr_triangulate +
         lasr_dtm + lasr_dtm_pitfill +
@@ -140,7 +149,8 @@ xxst_time = Sys.time()
         lasr_chm + lasr_chm_pitfill
   }else{
     # pipeline
-      lasr_pipeline_temp = lasr_classify() + lasr_denoise + lasr_denoise_filter +
+      lasr_pipeline_temp = lasr_read +
+        lasr_classify() + lasr_denoise + lasr_denoise_filter +
         lasr_triangulate + 
         lasr_dtm + lasr_dtm_pitfill +
         lasr_normalize + lasr_write_normalize +
@@ -182,6 +192,63 @@ xxst_time = Sys.time()
   # lidR::opt_chunk_buffer(las_grid) = 30
   # lidR::opt_progress(las_grid) = T
   
+  # norm_ctg_temp = lidR::readLAScatalog(config$input_las_dir)
+  # # retile catalog
+  # lidR::opt_progress(norm_ctg_temp) = F
+  # lidR::opt_output_files(norm_ctg_temp) = paste0(config$las_grid_dir,"/", "_{XLEFT}_{YBOTTOM}") # label outputs based on coordinates
+  # lidR::opt_chunk_buffer(norm_ctg_temp) = 0
+  # lidR::opt_chunk_size(norm_ctg_temp) = 400 # retile
+  # lidR::catalog_retile(norm_ctg_temp) # apply retile
+  # # create spatial index
+  # create_lax_for_tiles(
+  #   las_file_list = list.files(config$las_grid_dir, pattern = ".*\\.(laz|las)$", full.names = T)
+  # )
+  # # clean up
+  # remove(norm_ctg_temp)
+  # gc()
+  #   
+  
+  # define function to get chunk size based on sample data testing
+  get_chunk_size_fn = function(ctg, max_pts_m2 = 1000, min_chunk_m2 = 1500){
+    dta_sum = ctg@data %>%
+      dplyr::mutate(
+        area_m2 = sf::st_area(geometry) %>% as.numeric()
+        , pts = Number.of.point.records
+      ) %>% 
+      sf::st_drop_geometry() %>% 
+      dplyr::select(area_m2, pts) %>% 
+      dplyr::summarise(
+        mean_area_m2 = mean(area_m2)
+        , dplyr::across(.cols = tidyselect::everything(), .fns = sum)
+      ) %>% 
+      dplyr::mutate(pts_m2 = pts/area_m2) %>% 
+      dplyr::filter(pts_m2==max(pts_m2)) %>% 
+      dplyr::mutate(
+        factor = pts_m2/max_pts_m2
+        , xxx = mean_area_m2/factor
+        , chunk = dplyr::case_when(
+            factor <= 1 ~ 0
+            , TRUE ~ ifelse(mean_area_m2/factor<min_chunk_m2,min_chunk_m2,mean_area_m2/factor)
+          ) %>%
+          sqrt() %>%
+          round(digits = -2) # round to nearest 100
+      )
+    return(dta_sum$chunk[1])
+  }
+
+  # set options  
+  lidR::opt_chunk_size(las_ctg) = get_chunk_size_fn(ctg = las_ctg, max_pts_m2 = 1000)
+  lidR::opt_chunk_buffer(las_ctg) = 10
+  # plot(las_ctg, chunk = T)
+  
+  message(
+    "starting lasR processing with a chunk size of "
+    , lidR::opt_chunk_size(las_ctg)
+    , " (0 = no chunking) and a buffer of "
+    , lidR::opt_chunk_buffer(las_ctg)
+    , "..."
+    , Sys.time()
+  )
   # execute
     lasr_ans = lasR::exec(
       lasr_pipeline_temp
@@ -189,9 +256,10 @@ xxst_time = Sys.time()
       # , on = list.files(config$input_las_dir, pattern = ".*\\.(laz|las)$", full.names = T)
       , on = las_ctg
       # , on = las_grid
-      , buffer = 10 #las_grid_buff_m # 10
-      , chunk = 100 #las_grid_res_m # 100
+      # , buffer = 10 #las_grid_buff_m # 10
+      # , chunk = 1500 #las_grid_res_m # 100
     )
+  
   # clean up
     remove(list = ls()[grep("_temp",ls())])
     gc()
@@ -299,7 +367,7 @@ xxst_time = Sys.time()
   lidR::opt_chunk_buffer(norm_ctg_temp) = las_grid_buff_m
   lidR::opt_chunk_size(norm_ctg_temp) = las_grid_res_m # retile
   lidR::catalog_retile(norm_ctg_temp) # apply retile
-  # classify
+  # create spatial index
   create_lax_for_tiles(
     las_file_list = list.files(config$las_grid_dir, pattern = ".*\\.(laz|las)$", full.names = T)
   )

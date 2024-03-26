@@ -62,8 +62,8 @@
   ### use parallel processing? (T/F) ###
   ### parallel processing may not work on all machines ###
   ###____________________###
-  use_parallel_processing = F
-  # use_parallel_processing = T
+  # use_parallel_processing = F
+  use_parallel_processing = T
   
   ###____________________###
   ### Set directory for outputs ###
@@ -75,8 +75,8 @@
   ### Set input las directory ###
   ###_________________________###
   # !!!!!!!!!! ENSURE FILES ARE PROJECTED IN CRS THAT USES METRE AS MEASURMENT UNIT
-  input_las_dir = "../data/testtest"
-  # input_las_dir = "../data/lower_sherwin_clip"
+  # input_las_dir = "../data/testtest"
+  input_las_dir = "../data/lower_sherwin_clip"
   
   ###_________________________###
   ### Set input TreeMap directory ###
@@ -295,12 +295,15 @@
       return(x)
     } else if(
         class(x) == "list"
-        & length(purrr::keep(x, inherits, "SpatRaster"))==1
+        & length(purrr::keep(x, inherits, "SpatRaster"))>=1
       ){
       r = purrr::keep(x, inherits, "SpatRaster") %>% 
-        purrr::pluck(1)
+        # take the last raster
+        purrr::pluck(
+          length(purrr::keep(x, inherits, "SpatRaster"))
+        )
       return(r)
-    }else{stop("No raster found or >1 raster found")}
+    }else{stop("No raster found")}
   }
 #################################################################################
 #################################################################################
