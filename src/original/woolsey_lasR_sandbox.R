@@ -100,7 +100,7 @@ xxst_time = Sys.time()
     lasr_write_normalize = lasR::write_las(
       filter = "-drop_z_below 0"
       , ofile = paste0(config$las_normalize_dir, "/*_normalize.las")
-      , keep_buffer = F
+      , keep_buffer = T
     )
 
 ###################
@@ -209,7 +209,7 @@ xxst_time = Sys.time()
   #   
   
   # define function to get chunk size based on sample data testing
-  get_chunk_size_fn = function(ctg, max_pts_m2 = 1000, min_chunk_m2 = 1500){
+  get_chunk_size_fn = function(ctg, max_pts_m2 = 1000){
     dta_sum = ctg@data %>%
       dplyr::mutate(
         area_m2 = sf::st_area(geometry) %>% as.numeric()
@@ -218,28 +218,33 @@ xxst_time = Sys.time()
       sf::st_drop_geometry() %>% 
       dplyr::select(area_m2, pts) %>% 
       dplyr::summarise(
-        mean_area_m2 = mean(area_m2)
-        , dplyr::across(.cols = tidyselect::everything(), .fns = sum)
+        tot_area_m2 = sum(area_m2)
+        , dplyr::across(.cols = tidyselect::everything(), .fns = mean)
       ) %>% 
       dplyr::mutate(pts_m2 = pts/area_m2) %>% 
       dplyr::filter(pts_m2==max(pts_m2)) %>% 
       dplyr::mutate(
         factor = pts_m2/max_pts_m2
-        , xxx = mean_area_m2/factor
         , chunk = dplyr::case_when(
             factor <= 1 ~ 0
-            , TRUE ~ ifelse(mean_area_m2/factor<min_chunk_m2,min_chunk_m2,mean_area_m2/factor)
-          ) %>%
-          sqrt() %>%
-          round(digits = -2) # round to nearest 100
+            , TRUE ~ round(sqrt(tot_area_m2/factor), digits = -1) # round to nearest 10
+          )
       )
     return(dta_sum$chunk[1])
   }
 
-  # set options  
+  # set options for retile
   lidR::opt_chunk_size(las_ctg) = get_chunk_size_fn(ctg = las_ctg, max_pts_m2 = 1000)
   lidR::opt_chunk_buffer(las_ctg) = 10
   # plot(las_ctg, chunk = T)
+  # apply the retile
+  lidR::opt_progress(las_ctg) = F
+  lidR::opt_output_files(las_ctg) = paste0(config$las_grid_dir,"/", "_{XLEFT}_{YBOTTOM}") # label outputs based on coordinates
+  lidR::catalog_retile(las_ctg) # apply retile
+  # create spatial index
+  create_lax_for_tiles(
+    las_file_list = list.files(config$las_grid_dir, pattern = ".*\\.(laz|las)$", full.names = T)
+  )
   
   message(
     "starting lasR processing with a chunk size of "
@@ -253,8 +258,9 @@ xxst_time = Sys.time()
     lasr_ans = lasR::exec(
       lasr_pipeline_temp
       , ncores = (lasR::ncores()-1)
-      # , on = list.files(config$input_las_dir, pattern = ".*\\.(laz|las)$", full.names = T)
-      , on = las_ctg
+      , on = list.files(config$las_grid_dir, pattern = ".*\\.(laz|las)$", full.names = T)
+      , progress = T
+      # , on = las_ctg
       # , on = las_grid
       # , buffer = 10 #las_grid_buff_m # 10
       # , chunk = 1500 #las_grid_res_m # 100
@@ -357,23 +363,23 @@ xxst_time = Sys.time()
     # remove(lasr_ans)
     gc()
 
-###################################
-# tile the normalized files to process with TreeLS
-###################################
-  norm_ctg_temp = lidR::readLAScatalog(config$las_normalize_dir)
-  # retile catalog
-  lidR::opt_progress(norm_ctg_temp) = F
-  lidR::opt_output_files(norm_ctg_temp) = paste0(config$las_grid_dir,"/", "_{XLEFT}_{YBOTTOM}") # label outputs based on coordinates
-  lidR::opt_chunk_buffer(norm_ctg_temp) = las_grid_buff_m
-  lidR::opt_chunk_size(norm_ctg_temp) = las_grid_res_m # retile
-  lidR::catalog_retile(norm_ctg_temp) # apply retile
-  # create spatial index
-  create_lax_for_tiles(
-    las_file_list = list.files(config$las_grid_dir, pattern = ".*\\.(laz|las)$", full.names = T)
-  )
-  # clean up
-  remove(list = ls()[grep("_temp",ls())])
-  gc()
+# ###################################
+# # tile the normalized files to process with TreeLS
+# ###################################
+#   norm_ctg_temp = lidR::readLAScatalog(config$las_normalize_dir)
+#   # retile catalog
+#   lidR::opt_progress(norm_ctg_temp) = F
+#   lidR::opt_output_files(norm_ctg_temp) = paste0(config$las_grid_dir,"/", "_{XLEFT}_{YBOTTOM}") # label outputs based on coordinates
+#   lidR::opt_chunk_buffer(norm_ctg_temp) = las_grid_buff_m
+#   lidR::opt_chunk_size(norm_ctg_temp) = las_grid_res_m # retile
+#   lidR::catalog_retile(norm_ctg_temp) # apply retile
+#   # create spatial index
+#   create_lax_for_tiles(
+#     las_file_list = list.files(config$las_grid_dir, pattern = ".*\\.(laz|las)$", full.names = T)
+#   )
+#   # clean up
+#   remove(list = ls()[grep("_temp",ls())])
+#   gc()
 
 message("total time to process was "
           , difftime(Sys.time(), xxst_time, units = c("mins")) %>% as.numeric()
@@ -649,7 +655,7 @@ chm_rast %>%
       #######################################
       ### a parallel version is:
       #######################################
-        flist_temp = list.files(config$las_grid_dir, pattern = ".*\\.(laz|las)$", full.names = T)
+        flist_temp = list.files(config$las_normalize_dir, pattern = ".*\\.(laz|las)$", full.names = T)
         # configure parallel
         cores = parallel::detectCores()
         cluster = parallel::makeCluster(cores-1)
@@ -673,7 +679,7 @@ chm_rast %>%
     }else{
       # map over the normalized point cloud tiles
       write_stem_las_ans = 
-        list.files(config$las_grid_dir, pattern = ".*\\.(laz|las)$", full.names = T) %>%
+        list.files(config$las_normalize_dir, pattern = ".*\\.(laz|las)$", full.names = T) %>%
           purrr::map(write_stem_las_fn, min_tree_height = minimum_tree_height_m)
     }
   

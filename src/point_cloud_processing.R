@@ -56,7 +56,7 @@
   ### keep those intermediate files (classfied, normalized, stem las files)
   ###____________________###
   # keep_intermediate_files = F
-  keep_intermediate_files = T
+  keep_intermediate_files = F
   
   ###____________________###
   ### use parallel processing? (T/F) ###
@@ -75,8 +75,8 @@
   ### Set input las directory ###
   ###_________________________###
   # !!!!!!!!!! ENSURE FILES ARE PROJECTED IN CRS THAT USES METRE AS MEASURMENT UNIT
-  # input_las_dir = "../data/testtest"
-  input_las_dir = "../data/lower_sherwin_clip"
+  input_las_dir = "../data/testtest"
+  # input_las_dir = "../data/lower_sherwin_clip"
   
   ###_________________________###
   ### Set input TreeMap directory ###
