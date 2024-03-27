@@ -76,7 +76,7 @@
   ###_________________________###
   # !!!!!!!!!! ENSURE FILES ARE PROJECTED IN CRS THAT USES METRE AS MEASURMENT UNIT
   input_las_dir = "../data/testtest"
-  # input_las_dir = "../data/lower_sherwin_clip"
+  # input_las_dir = "../data/lower_sherwin"
   
   ###_________________________###
   ### Set input TreeMap directory ###

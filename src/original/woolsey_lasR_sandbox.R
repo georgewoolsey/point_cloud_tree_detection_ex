@@ -21,45 +21,72 @@ list.files(config$delivery_dir, recursive = T, full.names = T) %>%
 xxst_time = Sys.time()
 
 ######################################
-# chunk for high density pt clouds
+# chunk for large area pt clouds
 ######################################
-# define function to get chunk size based on sample data testing
-  get_chunk_size_fn = function(ctg, max_pts_m2 = 1000){
-    dta_sum = ctg@data %>%
+  # set maximums based on sample data testing
+    max_area_m2 = 100e3 # original = 100e3
+    max_pts = 75e6 # original = 75e6
+  # determine chunks for las_ctg
+    chunk_data = las_ctg@data %>%
       dplyr::mutate(
         area_m2 = sf::st_area(geometry) %>% as.numeric()
         , pts = Number.of.point.records
       ) %>% 
       sf::st_drop_geometry() %>% 
-      dplyr::select(area_m2, pts) %>% 
-      dplyr::summarise(
-        tot_area_m2 = sum(area_m2)
-        , dplyr::across(.cols = tidyselect::everything(), .fns = mean)
-      ) %>% 
+      dplyr::select(filename, area_m2, pts) %>% 
       dplyr::mutate(pts_m2 = pts/area_m2) %>% 
-      dplyr::filter(pts_m2==max(pts_m2)) %>% 
+      # calculate factor to reduce by if needed
       dplyr::mutate(
-        factor = pts_m2/max_pts_m2
+        area_factor = area_m2/max_area_m2
+        , pt_factor = pts/max_pts
         , chunk = dplyr::case_when(
-            factor <= 1 ~ 0
-            , TRUE ~ round(sqrt(tot_area_m2/factor), digits = -1) # round to nearest 10
+            # no resize
+            area_factor <= 1 & pt_factor <= 1 ~ 0
+            # yes resize
+            , area_factor > 1 & pt_factor > 1 ~ min(
+              round(sqrt(area_m2/area_factor), digits = -1) # round to nearest 10
+              , round(sqrt(area_m2/pt_factor), digits = -1) # round to nearest 10
+            )
+            , area_factor > 1 ~ round(sqrt(area_m2/area_factor), digits = -1) # round to nearest 10
+            , pt_factor > 1 ~ round(sqrt(area_m2/pt_factor), digits = -1) # round to nearest 10
           )
       )
-    return(dta_sum$chunk[1])
-  }
+  # retile function
+    retile_fn = function(row_n){
+      if(chunk_data$chunk[row_n]>0){
+        # read as las ctg
+          ctg = lidR::readLAScatalog(chunk_data$filename[row_n])
+        # retile catalog
+          lidR::opt_progress(ctg) = F
+          lidR::opt_output_files(ctg) = paste0(
+            config$las_grid_dir,"/"
+            , word(chunk_data$filename[row_n],-1,sep = fixed("/")) %>% 
+              stringr::str_remove("\\.(laz|las)$")
+            , "_{XLEFT}_{YBOTTOM}") # label outputs based on coordinates
+          lidR::opt_chunk_buffer(ctg) = 20
+          lidR::opt_chunk_size(ctg) = chunk_data$chunk[row_n] # retile
+          retile_ctg = lidR::catalog_retile(ctg) # apply retile
+          lidR::opt_progress(ctg) = T
+        # get file list
+          las_list = retile_ctg@data$filename
+        # create spatial index
+          create_lax_for_tiles(
+            las_file_list = las_list
+          )
+      }else{
+        las_list = chunk_data$filename[row_n]
+      }
+      return(las_list)
+    }
+  # call the retile function
+    process_flist = 1:nrow(chunk_data) %>% 
+      purrr::map(retile_fn) %>% 
+      c() %>%
+      unlist()
+  # clean up
+    remove(list = ls()[grep("_temp",ls())])
+    gc()
 
-  # set options for retile
-  lidR::opt_chunk_size(las_ctg) = get_chunk_size_fn(ctg = las_ctg, max_pts_m2 = 1000)
-  lidR::opt_chunk_buffer(las_ctg) = 10
-  # plot(las_ctg, chunk = T)
-  # apply the retile
-  lidR::opt_progress(las_ctg) = F
-  lidR::opt_output_files(las_ctg) = paste0(config$las_grid_dir,"/", "_{XLEFT}_{YBOTTOM}") # label outputs based on coordinates
-  lidR::catalog_retile(las_ctg) # apply retile
-  # create spatial index
-  create_lax_for_tiles(
-    las_file_list = list.files(config$las_grid_dir, pattern = ".*\\.(laz|las)$", full.names = T)
-  )
 ######################################
 # lasR steps
 ######################################
@@ -195,8 +222,6 @@ xxst_time = Sys.time()
           , " -drop_z_above "
           , max_height_threshold_m
         )
-        # write to disk to preserve memory
-        # , ofile = paste0(config$chm_dir, "/", "*_chm.tif")
       )
     # Pits and spikes filling for raster with algorithm from St-Onge 2008 (see reference).
       lasr_chm_pitfill = lasR::pit_fill(raster = lasr_chm, ofile = chm_file_name)
@@ -234,24 +259,26 @@ xxst_time = Sys.time()
 ######################################
 # execute pipeline
 ######################################
-  message(
-    "starting lasR processing with a chunk size of "
-    , lidR::opt_chunk_size(las_ctg)
-    , " (0 = no chunking) and a buffer of "
-    , lidR::opt_chunk_buffer(las_ctg)
-    , "..."
-    , Sys.time()
-  )
+  # message
+    message(
+      # "starting lasR processing with a chunk size of "
+      # , got_chunk_size
+      # , " (0 = no chunking) and a buffer of "
+      # , lidR::opt_chunk_buffer(las_ctg)
+      "starting lasR processing at"
+      , "..."
+      , Sys.time()
+    )
   # execute
     lasr_ans = lasR::exec(
       lasr_pipeline_temp
       , ncores = (lasR::ncores()-1)
-      , on = list.files(config$las_grid_dir, pattern = ".*\\.(laz|las)$", full.names = T)
+      , on = process_flist # defined above in retile step
       , progress = T
       # , on = las_ctg
-      # , on = las_grid
+      # , on = list.files(process_dir, pattern = ".*\\.(laz|las)$", full.names = T)
       # , buffer = 10 #las_grid_buff_m # 10
-      # , chunk = 1500 #las_grid_res_m # 100
+      # , chunk = get_chunk_size_fn(ctg = las_ctg, max_pts_m2 = 1000) #las_grid_res_m # 100
     )
   
   # clean up
@@ -371,6 +398,7 @@ xxst_time = Sys.time()
 
 message("total time to process was "
           , difftime(Sys.time(), xxst_time, units = c("mins")) %>% as.numeric()
+          # , difftime(xx7_treels_start_time, xx1_tile_start_time, units = c("mins")) %>% as.numeric()
           , "mins"
         )
   
