@@ -109,7 +109,7 @@ xxst_time = Sys.time()
   ###################
     # classify isolated points
     lasr_denoise = lasR::classify_isolated_points(res =  5, n = 6)
-    lasr_denoise_filter = lasR::delete_points(filter = lasR::drop_noise())
+    # lasr_denoise_filter = lasR::delete_points(filter = lasR::drop_noise())
     
   ###################
   # dtm
@@ -119,7 +119,7 @@ xxst_time = Sys.time()
     # perform Delaunay triangulation
       lasr_triangulate = lasR::triangulate(
         # class 2 = ground; class 9 = water
-        filter = lasR::keep_ground() + lasR::keep_class(c(9))
+        filter = lasR::keep_ground() + lasR::keep_class(c(9)) + lasR::drop_noise()
         , max_edge = c(0,1)
         # # write to disk to preserve memory
         # , ofile = paste0(config$las_denoise_dir, "/", "*_tri.gpkg")
@@ -128,8 +128,9 @@ xxst_time = Sys.time()
       lasr_dtm = lasR::rasterize(
         res = desired_dtm_res
         , lasr_triangulate
+        , filter = lasR::drop_noise()
         # write to disk to preserve memory
-        # , ofile = paste0(config$dtm_dir, "/", "*_dtm.tif")
+        , ofile = paste0(config$dtm_dir, "/", "*_dtm.tif")
       )
     # # Pits and spikes filling for raster with algorithm from St-Onge 2008 (see reference).
       lasr_dtm_pitfill = lasR::pit_fill(raster = lasr_dtm, ofile = dtm_file_name)
@@ -139,9 +140,38 @@ xxst_time = Sys.time()
   ###################
     # normalize
       lasr_normalize = lasR::transform_with(lasr_triangulate, operator = "-")
+      ##### ^^^^^ this was taking forever with high density point clouds
+      ##### .... trying with callback instead
+    # define normalize function using callback
+      lasr_normalize_expose = function(use_tin = F){
+        normalize_ht = function(data, use_tin)
+        {
+          # read with lidR
+          las = lidR::LAS(data)
+          # height normalize
+          if(use_tin == T){
+            # height normalize using tin
+            las_norm = lidR::normalize_height(las, algorithm = tin())
+          }else{
+            # height normalize using knnidw
+            las_norm = lidR::normalize_height(las, algorithm = knnidw())
+          }
+          # update Z
+          data$Z = as.numeric(las_norm@data$Z)
+          return(data)
+        }
+        # pass to callback
+        normalize = lasR::callback(
+          normalize_ht
+          , expose = "xyzc"
+          # normalize options
+          , use_tin = use_tin
+        )
+        return(normalize)
+      }
     # write
       lasr_write_normalize = lasR::write_las(
-        filter = "-drop_z_below 0"
+        filter = "-drop_z_below 0 -drop_class 2 9 18"
         , ofile = paste0(config$las_normalize_dir, "/*_normalize.las")
         , keep_buffer = T
       )
@@ -160,7 +190,7 @@ xxst_time = Sys.time()
         res = desired_chm_res
         , operators = "max"
         , filter = paste0(
-          "-drop_class 2 9 -drop_z_below "
+          "-drop_class 2 9 18 -drop_z_below "
           , minimum_tree_height_m
           , " -drop_z_above "
           , max_height_threshold_m
@@ -188,15 +218,17 @@ xxst_time = Sys.time()
         lasr_write_classify + 
         lasr_triangulate +
         lasr_dtm + lasr_dtm_pitfill +
-        lasr_normalize + lasr_write_normalize +
+        # lasr_normalize + lasr_write_normalize +
+        lasr_normalize_expose() + lasr_write_normalize +
         lasr_chm + lasr_chm_pitfill
   }else{
     # pipeline
       lasr_pipeline_temp = lasr_read +
-        lasr_classify() + lasr_denoise + lasr_denoise_filter +
-        lasr_triangulate + 
+        lasr_classify() + lasr_denoise + 
+        lasr_triangulate +
         lasr_dtm + lasr_dtm_pitfill +
-        lasr_normalize + lasr_write_normalize +
+        # lasr_normalize + lasr_write_normalize +
+        lasr_normalize_expose() + lasr_write_normalize +
         lasr_chm + lasr_chm_pitfill
   }
 ######################################
