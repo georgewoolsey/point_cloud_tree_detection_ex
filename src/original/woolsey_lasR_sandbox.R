@@ -5,9 +5,6 @@
 ################################################################################
 ################################################################################
 ################################################################################
-######################################
-# DEFINE ALL lasR pipeline steps
-######################################
 
 ########## !!!!!!!!!!!!!!!!! run point_cloud_processing.r to line 328...thru: 
  ## las_ctg = lidR::readLAScatalog(config$input_las_dir)
@@ -21,67 +18,20 @@ list.files(config$delivery_dir, recursive = T, full.names = T) %>%
 xxst_time = Sys.time()
 
 ######################################
-# chunk for large area pt clouds
+# chunk for large area/pt pt clouds
+# adpative retiling w/ minimal (no?) user input
 ######################################
   # set maximums based on sample data testing
     max_area_m2 = 90e3 # original = 90e3
     max_pts = 70e6 # original = 70e6
-  # determine chunks for las_ctg
-    chunk_data = las_ctg@data %>%
+  # check for overlaps in whole catalog
+    overlap_data = las_ctg@data %>%
       dplyr::mutate(
         area_m2 = sf::st_area(geometry) %>% as.numeric()
         , pts = Number.of.point.records
       ) %>% 
       sf::st_drop_geometry() %>% 
       dplyr::select(filename, area_m2, pts) %>% 
-      dplyr::mutate(pts_m2 = pts/area_m2) %>% 
-      # calculate factor to reduce by if needed
-      dplyr::mutate(
-        area_factor = area_m2/max_area_m2
-        , pt_factor = pts/max_pts
-        , chunk = dplyr::case_when(
-            # no resize
-            area_factor <= 1 & pt_factor <= 1 ~ 0
-            # yes resize
-            , area_factor > 1 & pt_factor > 1 ~ min(
-              round(sqrt(area_m2/area_factor), digits = -1) # round to nearest 10
-              , round(sqrt(area_m2/pt_factor), digits = -1) # round to nearest 10
-            )
-            , area_factor > 1 ~ round(sqrt(area_m2/area_factor), digits = -1) # round to nearest 10
-            , pt_factor > 1 ~ round(sqrt(area_m2/pt_factor), digits = -1) # round to nearest 10
-          )
-        , buffer = ifelse(round(chunk*0.1,digits=-1)<10,10,round(chunk*0.1,digits=-1))
-      )
-  # retile individual file function
-    retile_fn = function(row_n){
-      if(chunk_data$chunk[row_n]>0){
-        # read as las ctg
-          ctg = lidR::readLAScatalog(chunk_data$filename[row_n])
-        # retile catalog
-          lidR::opt_progress(ctg) = F
-          lidR::opt_output_files(ctg) = paste0(
-            config$las_grid_dir,"/"
-            , word(chunk_data$filename[row_n],-1,sep = fixed("/")) %>% 
-              stringr::str_remove("\\.(laz|las)$")
-            , "_{XLEFT}_{YBOTTOM}") # label outputs based on coordinates
-          lidR::opt_chunk_buffer(ctg) = chunk_data$buffer[row_n]
-          lidR::opt_chunk_size(ctg) = chunk_data$chunk[row_n] # retile
-          retile_ctg = lidR::catalog_retile(ctg) # apply retile
-          lidR::opt_progress(ctg) = T
-        # get file list
-          las_list = retile_ctg@data$filename
-        # create spatial index
-          create_lax_for_tiles(
-            las_file_list = las_list
-          )
-      }else{
-        las_list = chunk_data$filename[row_n]
-      }
-      return(las_list)
-    }
-  # check for overlaps in whole catalog
-    overlap_data =
-      chunk_data %>% 
       dplyr::ungroup() %>% 
       dplyr::summarise(
         dplyr::across(.cols = c(area_m2, pts), .fns = sum)
@@ -115,40 +65,93 @@ xxst_time = Sys.time()
         , buffer = ifelse(round(chunk*0.1,digits=-1)<10,10,round(chunk*0.1,digits=-1))
       )
   # retile whole catalog if high overlap
-  # !!!! this if/else flow creates "process_flist" which is the list of files that will be processed
-    if(overlap_data$pct_overlap[1] > 0.1){
-        # if need to retile
-        if(overlap_data$chunk[1] == 0){
-          # if files are small enough just process as-is
-          process_flist = chunk_data$filename
-        }else{
-          # retile catalog
-          lidR::opt_progress(las_ctg) = F
-          lidR::opt_output_files(las_ctg) = paste0(config$las_grid_dir,"/", "_{XLEFT}_{YBOTTOM}") # label outputs based on coordinates
-          lidR::opt_chunk_buffer(las_ctg) = overlap_data$buffer[1]
-          lidR::opt_chunk_size(las_ctg) = overlap_data$chunk[1] # retile
-          lidR::catalog_retile(las_ctg) # apply retile
-          lidR::opt_progress(las_ctg) = T
-          # process list
-          process_flist = list.files(config$las_grid_dir, pattern = ".*\\.(laz|las)$", full.names = T)
-          # create spatial index
-          create_lax_for_tiles(
-            las_file_list = process_flist
-          )
-        }
-    }else{
-      # otherwise, retile individiually
-      # call the retile function
-      process_flist = 1:nrow(chunk_data) %>% 
-        purrr::map(retile_fn) %>% 
-        c() %>%
-        unlist() 
+    if(
+      overlap_data$pct_overlap[1] > 0.1
+      & overlap_data$chunk[1] > 0
+    ){
+      # if need to retile
+      # retile catalog
+      lidR::opt_progress(las_ctg) = F
+      lidR::opt_output_files(las_ctg) = paste0(config$las_grid_dir,"/", "_{XLEFT}_{YBOTTOM}") # label outputs based on coordinates
+      # buffering is handled by lasR::exec so no need to buffer here
+      lidR::opt_chunk_buffer(las_ctg) = 0 # overlap_data$buffer[1]
+      lidR::opt_chunk_size(las_ctg) = overlap_data$chunk[1] # retile
+      # reset las_ctg
+      las_ctg = lidR::catalog_retile(las_ctg) # apply retile
+      lidR::opt_progress(las_ctg) = T
+      # create spatial index
+      create_lax_for_tiles(
+        las_file_list = list.files(config$las_grid_dir, pattern = ".*\\.(laz|las)$", full.names = T)
+      )
     }
+  # check if individual files need to be retiled
+  # determine chunks for las_ctg
+    chunk_data = las_ctg@data %>%
+      dplyr::mutate(
+        area_m2 = sf::st_area(geometry) %>% as.numeric()
+        , pts = Number.of.point.records
+      ) %>% 
+      sf::st_drop_geometry() %>% 
+      dplyr::select(filename, area_m2, pts) %>% 
+      dplyr::mutate(pts_m2 = pts/area_m2) %>% 
+      # calculate factor to reduce by if needed
+      dplyr::mutate(
+        area_factor = area_m2/max_area_m2
+        , pt_factor = pts/max_pts
+        , chunk = dplyr::case_when(
+            # no resize
+            area_factor <= 1 & pt_factor <= 1 ~ 0
+            # yes resize
+            , area_factor > 1 & pt_factor > 1 ~ min(
+              round(sqrt(area_m2/area_factor), digits = -1) # round to nearest 10
+              , round(sqrt(area_m2/pt_factor), digits = -1) # round to nearest 10
+            )
+            , area_factor > 1 ~ round(sqrt(area_m2/area_factor), digits = -1) # round to nearest 10
+            , pt_factor > 1 ~ round(sqrt(area_m2/pt_factor), digits = -1) # round to nearest 10
+          )
+        , buffer = ifelse(round(chunk*0.1,digits=-1)<10,10,round(chunk*0.1,digits=-1))
+      )
+  # retile individual file function based on chunk data
+    retile_fn = function(row_n){
+      if(chunk_data$chunk[row_n]>0){
+        # read as las ctg
+          ctg = lidR::readLAScatalog(chunk_data$filename[row_n])
+        # retile catalog
+          lidR::opt_progress(ctg) = F
+          lidR::opt_output_files(ctg) = paste0(config$las_grid_dir,"/", "_{XLEFT}_{YBOTTOM}") # label outputs based on coordinates
+          # buffering is handled by lasR::exec so no need to buffer here
+          lidR::opt_chunk_buffer(ctg) = 0 # chunk_data$buffer[row_n]
+          lidR::opt_chunk_size(ctg) = chunk_data$chunk[row_n] # retile
+          retile_ctg = lidR::catalog_retile(ctg) # apply retile
+          lidR::opt_progress(ctg) = T
+        # get file list
+          las_list = retile_ctg@data$filename
+        # create spatial index
+          create_lax_for_tiles(
+            las_file_list = las_list
+          )
+      }else{
+        las_list = chunk_data$filename[row_n]
+      }
+      return(las_list)
+    }  
+  # call the retile function
+    # !!!! this if/else flow creates "process_flist" which is the list of files that will be processed
+    process_flist = 1:nrow(chunk_data) %>% 
+      purrr::map(retile_fn) %>% 
+      c() %>%
+      unlist() 
     # process_flist
+    # plot(lidR::readLAScatalog(chunk_data$filename)) # orig
+    # plot(lidR::readLAScatalog(process_flist)) # new
+    
   # clean up
     remove(list = ls()[grep("_temp",ls())])
     gc()
 
+######################################
+# DEFINE ALL lasR pipeline steps
+######################################
 ######################################
 # lasR steps
 ######################################
@@ -301,7 +304,7 @@ xxst_time = Sys.time()
         )
     # pipeline
       lasr_pipeline_temp = lasr_read +
-        lasr_classify() + lasr_denoise + lasr_denoise_filter +
+        lasr_classify() + lasr_denoise +
         lasr_write_classify + 
         lasr_triangulate +
         lasr_dtm + lasr_dtm_pitfill +
