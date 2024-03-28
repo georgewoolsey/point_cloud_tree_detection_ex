@@ -24,8 +24,8 @@ xxst_time = Sys.time()
 # chunk for large area pt clouds
 ######################################
   # set maximums based on sample data testing
-    max_area_m2 = 100e3 # original = 100e3
-    max_pts = 75e6 # original = 75e6
+    max_area_m2 = 90e3 # original = 90e3
+    max_pts = 70e6 # original = 70e6
   # determine chunks for las_ctg
     chunk_data = las_ctg@data %>%
       dplyr::mutate(
@@ -50,8 +50,9 @@ xxst_time = Sys.time()
             , area_factor > 1 ~ round(sqrt(area_m2/area_factor), digits = -1) # round to nearest 10
             , pt_factor > 1 ~ round(sqrt(area_m2/pt_factor), digits = -1) # round to nearest 10
           )
+        , buffer = ifelse(round(chunk*0.1,digits=-1)<10,10,round(chunk*0.1,digits=-1))
       )
-  # retile function
+  # retile individual file function
     retile_fn = function(row_n){
       if(chunk_data$chunk[row_n]>0){
         # read as las ctg
@@ -63,7 +64,7 @@ xxst_time = Sys.time()
             , word(chunk_data$filename[row_n],-1,sep = fixed("/")) %>% 
               stringr::str_remove("\\.(laz|las)$")
             , "_{XLEFT}_{YBOTTOM}") # label outputs based on coordinates
-          lidR::opt_chunk_buffer(ctg) = 20
+          lidR::opt_chunk_buffer(ctg) = chunk_data$buffer[row_n]
           lidR::opt_chunk_size(ctg) = chunk_data$chunk[row_n] # retile
           retile_ctg = lidR::catalog_retile(ctg) # apply retile
           lidR::opt_progress(ctg) = T
@@ -78,11 +79,64 @@ xxst_time = Sys.time()
       }
       return(las_list)
     }
-  # call the retile function
-    process_flist = 1:nrow(chunk_data) %>% 
-      purrr::map(retile_fn) %>% 
-      c() %>%
-      unlist()
+  # check for overlaps in whole catalog
+    overlap_data =
+      chunk_data %>% 
+      dplyr::ungroup() %>% 
+      dplyr::summarise(
+        dplyr::across(.cols = c(area_m2, pts), .fns = sum)
+      ) %>% 
+      # attach overall area
+      dplyr::bind_cols(
+        las_ctg@data$geometry %>%
+          sf::st_union() %>% 
+          sf::st_as_sf() %>% 
+          sf::st_set_geometry("geometry") %>% 
+          dplyr::mutate(
+            total_area_m2 = sf::st_area(geometry) %>% as.numeric()
+          ) %>% 
+          sf::st_drop_geometry()
+      ) %>% 
+      dplyr::mutate(
+        pct_overlap = (area_m2-total_area_m2)/total_area_m2
+        , area_factor = total_area_m2/max_area_m2
+        , pt_factor = pts/max_pts
+        , chunk = dplyr::case_when(
+            # no resize
+            area_factor <= 1 & pt_factor <= 1 ~ 0
+            # yes resize
+            , area_factor > 1 & pt_factor > 1 ~ min(
+              round(sqrt(area_m2/area_factor), digits = -1) # round to nearest 10
+              , round(sqrt(area_m2/pt_factor), digits = -1) # round to nearest 10
+            )
+            , area_factor > 1 ~ round(sqrt(area_m2/area_factor), digits = -1) # round to nearest 10
+            , pt_factor > 1 ~ round(sqrt(area_m2/pt_factor), digits = -1) # round to nearest 10
+          )
+        , buffer = ifelse(round(chunk*0.1,digits=-1)<10,10,round(chunk*0.1,digits=-1))
+      )
+  # retile whole catalog if high overlap
+    if(overlap_data$pct_overlap[1] > 0.1){
+        # retile catalog
+        lidR::opt_progress(las_ctg) = F
+        lidR::opt_output_files(las_ctg) = paste0(config$las_grid_dir,"/", "_{XLEFT}_{YBOTTOM}") # label outputs based on coordinates
+        lidR::opt_chunk_buffer(las_ctg) = overlap_data$buffer[1]
+        lidR::opt_chunk_size(las_ctg) = overlap_data$chunk[1] # retile
+        lidR::catalog_retile(las_ctg) # apply retile
+        # create spatial index
+        create_lax_for_tiles(
+          las_file_list = list.files(config$las_grid_dir, pattern = ".*\\.(laz|las)$", full.names = T)
+        )
+        # clean up
+        remove(list = ls()[grep("_temp",ls())])
+        gc()
+    }else{
+      # otherwise, retile individiually
+      # call the retile function
+      process_flist = 1:nrow(chunk_data) %>% 
+        purrr::map(retile_fn) %>% 
+        c() %>%
+        unlist() 
+    }
   # clean up
     remove(list = ls()[grep("_temp",ls())])
     gc()
@@ -200,7 +254,7 @@ xxst_time = Sys.time()
       lasr_write_normalize = lasR::write_las(
         filter = "-drop_z_below 0 -drop_class 2 9 18"
         , ofile = paste0(config$las_normalize_dir, "/*_normalize.las")
-        , keep_buffer = T
+        , keep_buffer = F
       )
   
   ###################
