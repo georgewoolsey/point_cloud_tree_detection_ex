@@ -115,20 +115,27 @@ xxst_time = Sys.time()
         , buffer = ifelse(round(chunk*0.1,digits=-1)<10,10,round(chunk*0.1,digits=-1))
       )
   # retile whole catalog if high overlap
+  # !!!! this if/else flow creates "process_flist" which is the list of files that will be processed
     if(overlap_data$pct_overlap[1] > 0.1){
-        # retile catalog
-        lidR::opt_progress(las_ctg) = F
-        lidR::opt_output_files(las_ctg) = paste0(config$las_grid_dir,"/", "_{XLEFT}_{YBOTTOM}") # label outputs based on coordinates
-        lidR::opt_chunk_buffer(las_ctg) = overlap_data$buffer[1]
-        lidR::opt_chunk_size(las_ctg) = overlap_data$chunk[1] # retile
-        lidR::catalog_retile(las_ctg) # apply retile
-        # create spatial index
-        create_lax_for_tiles(
-          las_file_list = list.files(config$las_grid_dir, pattern = ".*\\.(laz|las)$", full.names = T)
-        )
-        # clean up
-        remove(list = ls()[grep("_temp",ls())])
-        gc()
+        # if need to retile
+        if(overlap_data$chunk[1] == 0){
+          # if files are small enough just process as-is
+          process_flist = chunk_data$filename
+        }else{
+          # retile catalog
+          lidR::opt_progress(las_ctg) = F
+          lidR::opt_output_files(las_ctg) = paste0(config$las_grid_dir,"/", "_{XLEFT}_{YBOTTOM}") # label outputs based on coordinates
+          lidR::opt_chunk_buffer(las_ctg) = overlap_data$buffer[1]
+          lidR::opt_chunk_size(las_ctg) = overlap_data$chunk[1] # retile
+          lidR::catalog_retile(las_ctg) # apply retile
+          lidR::opt_progress(las_ctg) = T
+          # process list
+          process_flist = list.files(config$las_grid_dir, pattern = ".*\\.(laz|las)$", full.names = T)
+          # create spatial index
+          create_lax_for_tiles(
+            las_file_list = process_flist
+          )
+        }
     }else{
       # otherwise, retile individiually
       # call the retile function
@@ -137,6 +144,7 @@ xxst_time = Sys.time()
         c() %>%
         unlist() 
     }
+    # process_flist
   # clean up
     remove(list = ls()[grep("_temp",ls())])
     gc()
