@@ -212,7 +212,8 @@ xxst_time = Sys.time()
       lasr_triangulate = lasR::triangulate(
         # class 2 = ground; class 9 = water
         filter = lasR::keep_ground() + lasR::keep_class(c(9)) + lasR::drop_noise()
-        , max_edge = c(0,1)
+        , max_edge = 0
+        # , max_edge = c(0,1)
         # # write to disk to preserve memory
         # , ofile = paste0(config$las_denoise_dir, "/", "*_tri.gpkg")
       )
@@ -221,7 +222,7 @@ xxst_time = Sys.time()
         res = desired_dtm_res
         , lasr_triangulate
         , filter = lasR::drop_noise()
-        # write to disk to preserve memory
+        # # write to disk to preserve memory
         , ofile = paste0(config$dtm_dir, "/", "*_dtm.tif")
       )
     # # Pits and spikes filling for raster with algorithm from St-Onge 2008 (see reference).
@@ -231,8 +232,16 @@ xxst_time = Sys.time()
   # normalize
   ###################
     # normalize
-      lasr_normalize = lasR::transform_with(lasr_triangulate, operator = "-")
-      ##### ^^^^^ this was taking forever with high density point clouds
+      # stage = triangulate: takes foreevvveerrrrrrr
+      # stage = pitfill:
+          # Error in lasR::transform_with(stage = lasr_dtm_pitfill, operator = "-") : 
+          # the stage must be a triangulation or a raster stage
+      lasr_normalize = lasR::transform_with(
+        # stage = lasr_triangulate
+        stage = lasr_dtm
+        , operator = "-"
+      )
+      ##### ^^^^^ this (with stage = tri) was taking forever with high density point clouds
       ##### .... trying with callback instead
     # define normalize function using callback
       lasr_normalize_expose = function(use_tin = F){
@@ -287,6 +296,7 @@ xxst_time = Sys.time()
           , " -drop_z_above "
           , max_height_threshold_m
         )
+        , ofile = ""
       )
     # Pits and spikes filling for raster with algorithm from St-Onge 2008 (see reference).
       lasr_chm_pitfill = lasR::pit_fill(raster = lasr_chm, ofile = chm_file_name)
@@ -308,8 +318,8 @@ xxst_time = Sys.time()
         lasr_write_classify + 
         lasr_triangulate +
         lasr_dtm + lasr_dtm_pitfill +
-        # lasr_normalize + lasr_write_normalize +
-        lasr_normalize_expose() + lasr_write_normalize +
+        lasr_normalize + lasr_write_normalize +
+        # lasr_normalize_expose() + lasr_write_normalize +
         lasr_chm + lasr_chm_pitfill
   }else{
     # pipeline
@@ -317,8 +327,8 @@ xxst_time = Sys.time()
         lasr_classify() + lasr_denoise + 
         lasr_triangulate +
         lasr_dtm + lasr_dtm_pitfill +
-        # lasr_normalize + lasr_write_normalize +
-        lasr_normalize_expose() + lasr_write_normalize +
+        lasr_normalize + lasr_write_normalize +
+        # lasr_normalize_expose() + lasr_write_normalize +
         lasr_chm + lasr_chm_pitfill
   }
 ######################################
@@ -468,6 +478,7 @@ message("total time to process was "
         )
   
 dtm_rast %>% 
+  # terra::aggregate(fact = 4) %>% 
   as.data.frame(xy = T) %>% 
   dplyr::rename(f=3) %>% 
   ggplot() +

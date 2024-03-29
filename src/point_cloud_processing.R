@@ -88,7 +88,7 @@
   ### Set the desired raster resolution in metres for the digital terrain model
   ###_________________________###
   # desired_dtm_res = 1
-  desired_dtm_res = 1
+  desired_dtm_res = 0.75
   
   ###_________________________###
   ### Set the desired raster resolution in metres for the canopy height model
