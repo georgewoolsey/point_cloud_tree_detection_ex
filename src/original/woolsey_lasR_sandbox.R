@@ -22,9 +22,16 @@ xxst_time = Sys.time()
 # adpative retiling w/ minimal (no?) user input
 ######################################
   # set maximums based on sample data testing
+  #### These maximums chunk the data
     max_area_m2 = 90e3 # original = 90e3
     max_pts = 70e6 # original = 70e6
+  #### This maximum filters the ground points to perform Delaunay triangulation
+    # see: https://github.com/r-lidar/lasR/issues/18#issuecomment-2027818414
+    max_pts_m2 = 100 # original = 100 ## at 100 pts/m2, the resulting CHM values (0.25m resolution)
+      # ... are within -0.009% and 0.026% of the values obtained by using 400 pts/m2 with 99% probability
+  ########################
   # check for overlaps in whole catalog
+  ########################
     overlap_data = las_ctg@data %>%
       dplyr::mutate(
         area_m2 = sf::st_area(geometry) %>% as.numeric()
@@ -84,7 +91,9 @@ xxst_time = Sys.time()
         las_file_list = list.files(config$las_grid_dir, pattern = ".*\\.(laz|las)$", full.names = T)
       )
     }
+  ########################
   # check if individual files need to be retiled
+  ########################
   # determine chunks for las_ctg
     chunk_data = las_ctg@data %>%
       dplyr::mutate(
@@ -110,6 +119,10 @@ xxst_time = Sys.time()
             , pt_factor > 1 ~ round(sqrt(area_m2/pt_factor), digits = -1) # round to nearest 10
           )
         , buffer = ifelse(round(chunk*0.1,digits=-1)<10,10,round(chunk*0.1,digits=-1))
+        , pts_m2_factor = dplyr::case_when(
+            max_pts_m2/pts_m2 >= 1 ~ 1
+            , TRUE ~ round(max_pts_m2/pts_m2, digits = 2)
+        )
       )
   # retile individual file function based on chunk data
     retile_fn = function(row_n){
@@ -170,7 +183,10 @@ xxst_time = Sys.time()
     # from the lidR::classify_ground() function in lidR. 
     # The advantage of using lasR here is the ability to pipe different stages.
     # There is no function in lasR to classify the points...create one
-    lasr_classify = function(
+  ################
+  # library(RCSF) # for the Cloth simulation filtering (CSF) (Zhang et al 2016) algorithm to classify points
+  ################
+    lasr_classify_csf = function(
       # csf options
       smooth = FALSE, threshold = 0.5
       , resolution = 0.5, rigidness = 1L
@@ -181,7 +197,7 @@ xxst_time = Sys.time()
         id = RCSF::CSF(data, smooth, threshold, resolution, rigidness, iterations, step)
         class = integer(nrow(data))
         class[id] = 2L
-        data$Classification <- class
+        data$Classification = class
         return(data)
       }
       
@@ -193,6 +209,22 @@ xxst_time = Sys.time()
         , resolution = resolution, rigidness = rigidness
         , iterations = iterations, step = step
       )
+      return(classify)
+    }
+  ################
+  # library(RMCC) # for the Multiscale Curvature Classification (MCC) (Evans and Hudak 2016) algorithm to classify points
+  ################
+    lasr_classify_mcc = function(s = 1.5, t = 0.3){
+      mcc = function(data, s, t)
+      {
+        id = RMCC::MCC(data, s, t)
+        class = integer(nrow(data))
+        class[id] = 2L
+        data$Classification = class
+        return(data)
+      }
+      
+      classify = callback(mcc, expose = "xyz", s = s, t = t)
       return(classify)
     }
   
@@ -209,9 +241,23 @@ xxst_time = Sys.time()
     # file name for write
       dtm_file_name = paste0(config$delivery_dir, "/dtm_", desired_dtm_res, "m.tif")
     # perform Delaunay triangulation
+      # tri = lasR::triangulate(filter = "-keep_class 2 -keep_class 9 -keep_random_fraction 0.01")
+      ####
+      # set filter based on # points
+      ####
+      filter_for_dtm = paste0(
+        "-keep_class 2 -keep_class 9 -keep_random_fraction "
+        , max(
+          median(chunk_data$pts_m2_factor)
+          , mean(chunk_data$pts_m2_factor)
+        ) %>% scales::comma(accuracy = 0.01)
+      )
+      ####
+      # triangulate with filter
+      ####
       lasr_triangulate = lasR::triangulate(
         # class 2 = ground; class 9 = water
-        filter = lasR::keep_ground() + lasR::keep_class(c(9)) + lasR::drop_noise()
+        filter = filter_for_dtm
         , max_edge = 0
         # , max_edge = c(0,1)
         # # write to disk to preserve memory
@@ -220,25 +266,34 @@ xxst_time = Sys.time()
     # rasterize the result of the Delaunay triangulation
       lasr_dtm = lasR::rasterize(
         res = desired_dtm_res
-        , lasr_triangulate
+        , operators = lasr_triangulate
         , filter = lasR::drop_noise()
         # # write to disk to preserve memory
-        , ofile = paste0(config$dtm_dir, "/", "*_dtm.tif")
+        , ofile = dtm_file_name
       )
-    # # Pits and spikes filling for raster with algorithm from St-Onge 2008 (see reference).
-      lasr_dtm_pitfill = lasR::pit_fill(raster = lasr_dtm, ofile = dtm_file_name)
-  
+
   ###################
   # normalize
   ###################
     # normalize
-      # stage = triangulate: takes foreevvveerrrrrrr
-      # stage = pitfill:
-          # Error in lasR::transform_with(stage = lasr_dtm_pitfill, operator = "-") : 
-          # the stage must be a triangulation or a raster stage
+    # stage = triangulate: takes foreevvveerrrrrrr
+      # ... but see: https://github.com/r-lidar/lasR/issues/18#issuecomment-2027818414
+      ## at this density of point, my advice is anyway to decimate your ground points. 
+      ## With 1/100 of the ground points you already have 5 ground pts/m2 to compute a 
+      ## DTM with a 1 m resolution! You could even decimate to 1/250. 
+      ## This will solve your computation time issue in the same time.
+      ## stage = dtm
+        # ... see: https://github.com/r-lidar/lasR/issues/17#issuecomment-2027698100
+        # also from the lidR book https://r-lidar.github.io/lidRbook/norm.html:
+          ## "Point cloud normalization without a DTM interpolates the elevation of 
+          ## every single point locations using ground points. It no longer uses elevations 
+          ## at discrete predefined locations. Thus the methods is exact, computationally speaking. 
+          ## It means that it is equivalent to using a continuous DTM but it is important 
+          ## to recall that all interpolation methods are interpolation and by definition 
+          ## make guesses with different strategies. Thus by “exact” we mean “continuous”.
       lasr_normalize = lasR::transform_with(
-        # stage = lasr_triangulate
-        stage = lasr_dtm
+        stage = lasr_triangulate
+        # stage = lasr_dtm
         , operator = "-"
       )
       ##### ^^^^^ this (with stage = tri) was taking forever with high density point clouds
@@ -304,6 +359,24 @@ xxst_time = Sys.time()
 ######################################
 # lasR full pipeline
 ######################################
+  ################
+  # choose classification algorithm
+  ################
+    classification_alg = "csf"
+    if(tolower(classification_alg)=="mcc"){
+      lasr_classify = lasr_classify_mcc(s = 1.5, t = 0.3)
+    }else{
+      lasr_classify = lasr_classify_csf(
+        # csf options
+        smooth = FALSE, threshold = 0.5
+        , resolution = 0.5, rigidness = 1L
+        , iterations = 500L, step = 0.65
+      )
+    }
+  
+  ################
+  # buld pipeline
+  ################
   if(keep_intermediate_files == T){
     # set up intermediate file write steps
       # classify write step
@@ -314,19 +387,19 @@ xxst_time = Sys.time()
         )
     # pipeline
       lasr_pipeline_temp = lasr_read +
-        lasr_classify() + lasr_denoise +
+        lasr_classify + lasr_denoise +
         lasr_write_classify + 
         lasr_triangulate +
-        lasr_dtm + lasr_dtm_pitfill +
+        lasr_dtm +
         lasr_normalize + lasr_write_normalize +
         # lasr_normalize_expose() + lasr_write_normalize +
         lasr_chm + lasr_chm_pitfill
   }else{
     # pipeline
       lasr_pipeline_temp = lasr_read +
-        lasr_classify() + lasr_denoise + 
+        lasr_classify + lasr_denoise + 
         lasr_triangulate +
-        lasr_dtm + lasr_dtm_pitfill +
+        lasr_dtm +
         lasr_normalize + lasr_write_normalize +
         # lasr_normalize_expose() + lasr_write_normalize +
         lasr_chm + lasr_chm_pitfill
@@ -1879,4 +1952,133 @@ xx86_end_time = Sys.time()
     , paste0(config$delivery_dir, "/processed_tracking_data.csv")
     , row.names = F
   )
-    
+###########################################################################################################################
+###########################################################################################################################
+###########################################################################################################################
+###########################################################################################################################
+###########################################################################################################################
+###########################################################################################################################
+# testing differences in filtering for triangulation with high density point clds
+# ran kaibab_low, high_aggressive.las with different filtering for the number of points used for triangulation
+  # 400 pts/m2
+  # filter1 = 100% of points used (400 pts/m2)
+  # filter0.75 = 75% of points used (300 pts/m2)
+  # ....
+  # filter0.05 = 5% of points used (20 pts/m2)
+  
+  ### this is sloppy code but will suffice
+library(tidyverse)
+library(terra)
+library(brms)
+library(tidybayes)
+  
+r1 = terra::rast("c:/data/usfs/point_cloud_tree_detection_ex/data/03_delivery/filter1_chm_0.25m.tif")
+r2 = terra::rast("c:/data/usfs/point_cloud_tree_detection_ex/data/03_delivery/filter0.75_chm_0.25m.tif")
+r3 = terra::rast("c:/data/usfs/point_cloud_tree_detection_ex/data/03_delivery/filter0.5_chm_0.25m.tif")
+r4 = terra::rast("c:/data/usfs/point_cloud_tree_detection_ex/data/03_delivery/filter0.25_chm_0.25m.tif")
+r5 = terra::rast("c:/data/usfs/point_cloud_tree_detection_ex/data/03_delivery/filter0.05_chm_0.25m.tif")
+
+plot((r2-r1)/r1)
+
+l1 = as.matrix((r2-r1)/r1) %>% c()
+l1 = l1[!is.na(l1)]
+l2 = as.matrix((r3-r1)/r1) %>% c()
+l2 = l2[!is.na(l2)]
+l3 = as.matrix((r4-r1)/r1) %>% c()
+l3 = l3[!is.na(l3)]
+l4 = as.matrix((r5-r1)/r1) %>% c()
+l4 = l4[!is.na(l4)]
+
+dta = dplyr::bind_rows(
+  dplyr::tibble(
+    f = rep("0.75", length(l1))  
+    , pct_diff = l1
+  )
+  , dplyr::tibble(
+    f = rep("0.5", length(l2))  
+    , pct_diff = l2
+  )
+  , dplyr::tibble(
+    f = rep("0.25", length(l3))  
+    , pct_diff = l3
+  )
+  , dplyr::tibble(
+    f = rep("0.05", length(l4))  
+    , pct_diff = l4
+  )
+) %>% dplyr::mutate(f = factor(f))
+dta %>% dplyr::count(f)
+dta %>% dplyr::slice_sample(prop = 0.5) %>% ggplot(aes(x = f, y = pct_diff)) + geom_boxplot()
+
+# center
+mean_y = mean(dta$pct_diff)
+sd_y = sd(dta$pct_diff)
+dta$pct_diff_c = (dta$pct_diff-mean_y)/sd_y
+summary(dta$pct_diff_c)
+
+# stanvars
+gamma_a_b_from_omega_sigma <- function(mode, sd) {
+  if (mode <= 0) stop("mode must be > 0")
+  if (sd   <= 0) stop("sd must be > 0")
+  rate <- (mode + sqrt(mode^2 + 4 * sd^2)) / (2 * sd^2)
+  shape <- 1 + mode * rate
+  return(list(shape = shape, rate = rate))
+}
+
+mean_y_c = mean(dta$pct_diff_c)
+sd_y_c = sd(dta$pct_diff_c)
+omega <- sd_y_c / 2
+sigma <- 2 * sd_y_c
+(s_r <- gamma_a_b_from_omega_sigma(mode = omega, sd = sigma))
+
+stanvars <- 
+  brms::stanvar(mean_y_c,    name = "mean_y_c") + 
+  brms::stanvar(sd_y_c,      name = "sd_y_c") +
+  brms::stanvar(s_r$shape, name = "alpha") +
+  brms::stanvar(s_r$rate,  name = "beta")
+
+m1 = brms::brm(
+  formula = pct_diff_c ~ 1 + (1|f)
+  , data = dta
+  , iter = 2000, warmup = 1000, chains = 4
+  , prior = c(
+    brms::prior(normal(mean_y_c, sd_y_c * 5), class = Intercept)
+    , brms::prior(gamma(alpha, beta), class = sd)
+    , brms::prior(cauchy(0, sd_y_c), class = sigma)
+  )
+  , stanvars = stanvars
+  , file = "c:/data/usfs/point_cloud_tree_detection_ex/data/03_delivery/brmsm1"
+)
+# chains
+plot(m1)
+# plot dist
+dta %>%
+  dplyr::distinct(f) %>% 
+  tidybayes::add_epred_draws(m1) %>%
+  # transform b/c used centered/standardized y var
+  dplyr::mutate(
+    y_hat = (.epred*sd_y) + mean_y
+  ) %>% 
+  dplyr::ungroup() %>% 
+  ggplot(aes(x = y_hat, y = f)) +
+    geom_vline(xintercept = 0, linetype = "dashed") +
+    tidybayes::stat_dotsinterval(quantiles = 100) + 
+    scale_x_continuous(limits = c(-0.001,0.001), labels = scales::percent_format(accuracy = 0.01)) +
+    theme_light()
+  
+# hdi
+dta %>%
+  dplyr::distinct(f) %>% 
+  tidybayes::add_epred_draws(m1) %>%
+  # transform b/c used centered/standardized y var
+  dplyr::mutate(
+    y_hat = (.epred*sd_y) + mean_y
+    , lt_pct = ifelse(abs(y_hat)<0.05,1,0)
+  ) %>% 
+  tidybayes::median_hdi(y_hat, .width = c(0.5,0.9,0.95,0.99)) %>% 
+  dplyr::mutate(
+    dplyr::across(.cols = c(y_hat,.upper,.lower), .fns = ~ scales::percent(.x,accuracy = 0.001))
+  ) %>% 
+  dplyr::arrange(f,.width) %>% 
+  kableExtra::kbl() %>% 
+  kableExtra::kable_styling()

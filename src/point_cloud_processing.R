@@ -88,7 +88,7 @@
   ### Set the desired raster resolution in metres for the digital terrain model
   ###_________________________###
   # desired_dtm_res = 1
-  desired_dtm_res = 0.75
+  desired_dtm_res = 1
   
   ###_________________________###
   ### Set the desired raster resolution in metres for the canopy height model
@@ -185,7 +185,8 @@
 
   # modeling
   library(randomForest)
-  library(RCSF) # for the cloth simulation filter (csf) to classify points
+  library(RCSF) # for the Cloth simulation filtering (CSF) (Zhang et al 2016) algorithm to classify points
+  library(RMCC) # for the Multiscale Curvature Classification (MCC) (Evans and Hudak 2016) algorithm to classify points
   library(brms) # bayesian modelling using STAN engine
   
   # parallel computing
