@@ -27,7 +27,7 @@ xxst_time = Sys.time()
     max_pts = 70e6 # original = 70e6
   #### This maximum filters the ground points to perform Delaunay triangulation
     # see: https://github.com/r-lidar/lasR/issues/18#issuecomment-2027818414
-    max_pts_m2 = 100 # original = 100 ## at 100 pts/m2, the resulting CHM values (0.25m resolution)
+    max_pts_m2 = 100 # original = 100 ## at 100 pts/m2, the resulting CHM pixel values (0.25m resolution)
       # ... are within -0.009% and 0.026% of the values obtained by using 400 pts/m2 with 99% probability
   ########################
   # check for overlaps in whole catalog
@@ -158,6 +158,31 @@ xxst_time = Sys.time()
     # plot(lidR::readLAScatalog(chunk_data$filename)) # orig
     # plot(lidR::readLAScatalog(process_flist)) # new
     
+  # get pct filter for creating dtm and normalized point clouds using triangulation
+    chunk_data =
+      lidR::readLAScatalog(process_flist)@data %>% 
+        dplyr::mutate(
+          area_m2 = sf::st_area(geometry) %>% as.numeric()
+          , pts = Number.of.point.records
+        ) %>% 
+        sf::st_drop_geometry() %>% 
+        dplyr::select(filename, area_m2, pts) %>% 
+        dplyr::ungroup() %>% 
+        dplyr::mutate(
+          pts_m2 = pts/area_m2
+        # calculate factor to reduce by if needed
+          , pts_m2_factor_optimal = dplyr::case_when(
+              max_pts_m2/pts_m2 >= 1 ~ 1
+              , TRUE ~ round(max_pts_m2/pts_m2, digits = 2)
+          )
+          # pass this to filter_for_dtm
+          , pts_m2_factor_ctg = min(
+              median(pts_m2_factor_optimal)
+              , mean(pts_m2_factor_optimal)
+            ) 
+          , filtered_pts_m2 = pts_m2*pts_m2_factor_ctg
+        )
+    # chunk_data
   # clean up
     remove(list = ls()[grep("_temp",ls())])
     gc()
@@ -247,10 +272,7 @@ xxst_time = Sys.time()
       ####
       filter_for_dtm = paste0(
         "-keep_class 2 -keep_class 9 -keep_random_fraction "
-        , max(
-          median(chunk_data$pts_m2_factor)
-          , mean(chunk_data$pts_m2_factor)
-        ) %>% scales::comma(accuracy = 0.01)
+        , chunk_data$pts_m2_factor_ctg[1] %>% scales::comma(accuracy = 0.01)
       )
       ####
       # triangulate with filter
@@ -417,16 +439,22 @@ xxst_time = Sys.time()
       , "..."
       , Sys.time()
     )
-  # execute
+  # set lasR parallel processing options as of lasR 0.4.2
+    lasR::set_parallel_strategy(
+      strategy = lasR::concurrent_points(
+          ncores = (lasR::ncores()-1)
+        )
+    )
+  # lasR execute
     lasr_ans = lasR::exec(
       lasr_pipeline_temp
-      , ncores = (lasR::ncores()-1)
       , on = process_flist # defined above in retile step
-      , progress = T
-      # , on = las_ctg
-      # , on = list.files(process_dir, pattern = ".*\\.(laz|las)$", full.names = T)
-      # , buffer = 10 #las_grid_buff_m # 10
-      # , chunk = get_chunk_size_fn(ctg = las_ctg, max_pts_m2 = 1000) #las_grid_res_m # 100
+      # set lasR exec processing options as of lasR 0.4.2
+      , with = list(
+        progress = T
+        # , buffer = 10 #las_grid_buff_m # 10
+        # , chunk = 200 #las_grid_res_m # 100
+      )
     )
   
   # clean up
@@ -1976,7 +2004,9 @@ r1 = terra::rast("c:/data/usfs/point_cloud_tree_detection_ex/data/03_delivery/fi
 r2 = terra::rast("c:/data/usfs/point_cloud_tree_detection_ex/data/03_delivery/filter0.75_chm_0.25m.tif")
 r3 = terra::rast("c:/data/usfs/point_cloud_tree_detection_ex/data/03_delivery/filter0.5_chm_0.25m.tif")
 r4 = terra::rast("c:/data/usfs/point_cloud_tree_detection_ex/data/03_delivery/filter0.25_chm_0.25m.tif")
-r5 = terra::rast("c:/data/usfs/point_cloud_tree_detection_ex/data/03_delivery/filter0.05_chm_0.25m.tif")
+r5 = terra::rast("c:/data/usfs/point_cloud_tree_detection_ex/data/03_delivery/filter0.19_chm_0.25m.tif")
+r6 = terra::rast("c:/data/usfs/point_cloud_tree_detection_ex/data/03_delivery/filter0.13_chm_0.25m.tif")
+r7 = terra::rast("c:/data/usfs/point_cloud_tree_detection_ex/data/03_delivery/filter0.05_chm_0.25m.tif")
 
 plot((r2-r1)/r1)
 
@@ -1988,25 +2018,52 @@ l3 = as.matrix((r4-r1)/r1) %>% c()
 l3 = l3[!is.na(l3)]
 l4 = as.matrix((r5-r1)/r1) %>% c()
 l4 = l4[!is.na(l4)]
+l5 = as.matrix((r6-r1)/r1) %>% c()
+l5 = l5[!is.na(l5)]
+l6 = as.matrix((r7-r1)/r1) %>% c()
+l6 = l6[!is.na(l6)]
 
 dta = dplyr::bind_rows(
-  dplyr::tibble(
-    f = rep("0.75", length(l1))  
-    , pct_diff = l1
+    dplyr::tibble(
+      f = rep("300 pts.m2", length(l1))  
+      , pct_diff = l1
+    )
+    , dplyr::tibble(
+      f = rep("200 pts.m2", length(l2))  
+      , pct_diff = l2
+    )
+    , dplyr::tibble(
+      f = rep("100 pts.m2", length(l3))  
+      , pct_diff = l3
+    )
+    , dplyr::tibble(
+      f = rep("75 pts.m2", length(l4))  
+      , pct_diff = l4
+    )
+    , dplyr::tibble(
+      f = rep("50 pts.m2", length(l5))  
+      , pct_diff = l5
+    )
+    , dplyr::tibble(
+      f = rep("20 pts.m2", length(l6))  
+      , pct_diff = l6
+    )
+  ) %>% 
+  dplyr::mutate(
+    f = factor(
+      f
+      , ordered = T
+      , levels = c(
+        "300 pts.m2"
+        , "200 pts.m2"
+        , "100 pts.m2"
+        , "75 pts.m2"
+        , "50 pts.m2"
+        , "20 pts.m2"
+      )
+    )
   )
-  , dplyr::tibble(
-    f = rep("0.5", length(l2))  
-    , pct_diff = l2
-  )
-  , dplyr::tibble(
-    f = rep("0.25", length(l3))  
-    , pct_diff = l3
-  )
-  , dplyr::tibble(
-    f = rep("0.05", length(l4))  
-    , pct_diff = l4
-  )
-) %>% dplyr::mutate(f = factor(f))
+
 dta %>% dplyr::count(f)
 dta %>% dplyr::slice_sample(prop = 0.5) %>% ggplot(aes(x = f, y = pct_diff)) + geom_boxplot()
 
@@ -2082,3 +2139,17 @@ dta %>%
   dplyr::arrange(f,.width) %>% 
   kableExtra::kbl() %>% 
   kableExtra::kable_styling()
+
+# # m2 with continuous pts???
+# m2 = brms::brm(
+#   formula = pct_diff_c ~ 1 + (1|f)
+#   , data = dta
+#   , iter = 2000, warmup = 1000, chains = 4
+#   , prior = c(
+#     brms::prior(normal(mean_y_c, sd_y_c * 5), class = Intercept)
+#     , brms::prior(gamma(alpha, beta), class = sd)
+#     , brms::prior(cauchy(0, sd_y_c), class = sigma)
+#   )
+#   , stanvars = stanvars
+#   , file = "c:/data/usfs/point_cloud_tree_detection_ex/data/03_delivery/brmsm1"
+# )
