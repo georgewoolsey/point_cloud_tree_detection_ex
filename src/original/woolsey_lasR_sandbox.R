@@ -21,13 +21,25 @@ xxst_time = Sys.time()
 # chunk for large area/pt pt clouds
 # adpative retiling w/ minimal (no?) user input
 ######################################
+  # choose processing
+  # accuracy_level = 1 # uses DTM to height normalize the points
+  # accuracy_level = 2 # uses triangulation with low point density to height normalize the points
+  accuracy_level = 3 # uses triangulation with high point density to height normalize the points
   # set maximums based on sample data testing
   #### These maximums chunk the data
     max_area_m2 = 90e3 # original = 90e3
-    max_pts = 70e6 # original = 70e6
+    max_pts = dplyr::case_when(
+      sum(las_ctg@data$Number.of.point.records) > 70e6 ~ 30e6 
+      , T ~ 70e6
+    ) # original = 70e6
   #### This maximum filters the ground points to perform Delaunay triangulation
     # see: https://github.com/r-lidar/lasR/issues/18#issuecomment-2027818414
-    max_pts_m2 = 100 # original = 100 ## at 100 pts/m2, the resulting CHM pixel values (0.25m resolution)
+    max_pts_m2 = dplyr::case_when(
+      as.numeric(accuracy_level) <= 2 ~ 20 
+      , as.numeric(accuracy_level) == 3 ~ 100
+      , T ~ 20
+    )
+    # original = 100 ## at 100 pts/m2, the resulting CHM pixel values (0.25m resolution)
       # ... are within -0.009% and 0.026% of the values obtained by using 400 pts/m2 with 99% probability
   ########################
   # check for overlaps in whole catalog
@@ -175,14 +187,21 @@ xxst_time = Sys.time()
               max_pts_m2/pts_m2 >= 1 ~ 1
               , TRUE ~ round(max_pts_m2/pts_m2, digits = 2)
           )
-          # pass this to filter_for_dtm
-          , pts_m2_factor_ctg = min(
-              median(pts_m2_factor_optimal)
-              , mean(pts_m2_factor_optimal)
-            ) 
+          # area based weighted mean
+            # pass this to filter_for_dtm
+          , pts_m2_factor_ctg = stats::weighted.mean(
+              x = pts_m2_factor_optimal
+              , w = area_m2/sum(area_m2)
+            ) %>% 
+            round(digits = 2)
           , filtered_pts_m2 = pts_m2*pts_m2_factor_ctg
         )
-    # chunk_data
+    # save processing attributes
+    write.csv(
+      chunk_data
+      , paste0(config$delivery_dir, "/processing_las_tiling.csv")
+      , row.names = F
+    )
   # clean up
     remove(list = ls()[grep("_temp",ls())])
     gc()
@@ -429,6 +448,12 @@ xxst_time = Sys.time()
 ######################################
 # execute pipeline
 ######################################
+  # with multiple high density clouds...memory was issue
+    # force lasR::exec to operate with specified buffer using lidR LASCatalog settings
+      # these settings take precedence
+    tile_las_ctg = lidR::readLAScatalog(process_flist)
+    lidR::opt_chunk_buffer(tile_las_ctg) = 10
+    lidR::opt_chunk_size(tile_las_ctg) = 0
   # message
     message(
       # "starting lasR processing with a chunk size of "
@@ -442,13 +467,14 @@ xxst_time = Sys.time()
   # set lasR parallel processing options as of lasR 0.4.2
     lasR::set_parallel_strategy(
       strategy = lasR::concurrent_points(
-          ncores = (lasR::ncores()-1)
+          ncores = max(lasR::ncores()-1, lasR::half_cores())
         )
     )
   # lasR execute
     lasr_ans = lasR::exec(
       lasr_pipeline_temp
-      , on = process_flist # defined above in retile step
+      # , on = process_flist # defined above in retile step
+      , on = tile_las_ctg
       # set lasR exec processing options as of lasR 0.4.2
       , with = list(
         progress = T
@@ -2097,14 +2123,14 @@ stanvars <-
 m1 = brms::brm(
   formula = pct_diff_c ~ 1 + (1|f)
   , data = dta
-  , iter = 2000, warmup = 1000, chains = 4
+  , iter = 2000, warmup = 1000, chains = 4, cores = max(lasR::ncores()-2, lasR::half_cores())
   , prior = c(
     brms::prior(normal(mean_y_c, sd_y_c * 5), class = Intercept)
     , brms::prior(gamma(alpha, beta), class = sd)
     , brms::prior(cauchy(0, sd_y_c), class = sigma)
   )
   , stanvars = stanvars
-  , file = "c:/data/usfs/point_cloud_tree_detection_ex/data/03_delivery/brmsm1"
+  , file = "c:/data/usfs/point_cloud_tree_detection_ex/data/03_delivery/brms_m1"
 )
 # chains
 plot(m1)
@@ -2115,12 +2141,14 @@ dta %>%
   # transform b/c used centered/standardized y var
   dplyr::mutate(
     y_hat = (.epred*sd_y) + mean_y
+    , f = f %>% forcats::fct_rev()
   ) %>% 
   dplyr::ungroup() %>% 
   ggplot(aes(x = y_hat, y = f)) +
     geom_vline(xintercept = 0, linetype = "dashed") +
-    tidybayes::stat_dotsinterval(quantiles = 100) + 
+    tidybayes::stat_dotsinterval(point_interval = "median_hdi", quantiles = 100) + 
     scale_x_continuous(limits = c(-0.001,0.001), labels = scales::percent_format(accuracy = 0.01)) +
+    labs(y = "", x = "% difference from 400 pts.m2") +
     theme_light()
   
 # hdi
@@ -2139,6 +2167,40 @@ dta %>%
   dplyr::arrange(f,.width) %>% 
   kableExtra::kbl() %>% 
   kableExtra::kable_styling()
+
+# comparisons
+dta %>%
+  dplyr::distinct(f) %>% 
+  tidybayes::add_epred_draws(m1) %>%
+  dplyr::ungroup() %>% 
+  # transform b/c used centered/standardized y var
+  dplyr::mutate(
+    y_hat = (.epred*sd_y) + mean_y
+  ) %>% 
+  tidybayes::compare_levels(variable = y_hat, by = f, comparison = "pairwise") %>% 
+  dplyr::ungroup() %>% 
+  dplyr::mutate(
+    f = f %>% 
+      factor() %>% 
+      forcats::fct_reorder(stringr::word(f) %>% as.numeric())
+  ) %>% 
+  ggplot(
+      aes(
+        x = y_hat, y = f
+        , fill = after_stat(abs(x) < .0005)
+      )
+    ) +
+    geom_vline(xintercept = 0, linetype = "dashed") +
+    tidybayes::stat_halfeye(point_interval = "median_hdi") + 
+    # tidybayes::stat_dotsinterval(quantiles = 100) + 
+    labs(
+      fill = paste0("diff. <", scales::percent(.0005, accuracy = 0.01))
+      , y = "", x = "difference"
+    ) +
+    scale_x_continuous(labels = scales::percent_format(accuracy = 0.01)) +
+    scale_fill_manual(values = c("gray", "steelblue")) +
+    theme_light()
+
 
 # # m2 with continuous pts???
 # m2 = brms::brm(
