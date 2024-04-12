@@ -52,6 +52,22 @@
 #################################################################################
 #################################################################################
   ###____________________###
+  # choose processing accuracy
+  # XXL las catalogs (e.g. >70,000,000 pts) take a long time to process at accuracy_level = 3
+    # from the lidR book https://r-lidar.github.io/lidRbook/norm.html:
+      ## "Point cloud normalization without a DTM interpolates the elevation of 
+      ## every single point locations using ground points. It no longer uses elevations 
+      ## at discrete predefined locations (i.e. DTM). Thus the methods is exact, computationally speaking. 
+      ## It means that it is equivalent to using a continuous DTM but it is important 
+      ## to recall that all interpolation methods are interpolation and by definition 
+      ## make guesses with different strategies. Thus by “exact” we mean “continuous”.
+  ###____________________###
+  # accuracy_level = 1 # uses DTM to height normalize the points
+  # accuracy_level = 2 # uses triangulation with high point density (20 pts/m2) to height normalize the points
+  # accuracy_level = 3 # uses triangulation with very high point density (100 pts/m2) to height normalize the points
+  accuracy_level = 2
+
+  ###____________________###
   ### this process writes intermediate data to the disk
   ### keep those intermediate files (classfied, normalized, stem las files)
   ###____________________###
@@ -75,8 +91,8 @@
   ### Set input las directory ###
   ###_________________________###
   # !!!!!!!!!! ENSURE FILES ARE PROJECTED IN CRS THAT USES METRE AS MEASURMENT UNIT
-  input_las_dir = "../data/testtest"
   # input_las_dir = "../data/lower_sherwin"
+  input_las_dir = "../data/testtest"
   
   ###_________________________###
   ### Set input TreeMap directory ###
@@ -130,23 +146,39 @@
   ###_________________________###
   # user_supplied_epsg = "6345"
   user_supplied_epsg = NA
+#################################################################################
+#################################################################################
+# Developer Parameters
+# ...these parameters control the automatic "chunking" of data and script flows
+# ...should only need to be adjusted if running into "R Session Aborted" errors 
+# ...which is largely due to memory full issues
+#################################################################################
+#################################################################################
+  ######################################
+  # chunk for large area/pt pt clouds
+  # adpative retiling w/ minimal (no?) user input
+  # set maximums based on sample data testing
+  ######################################
+  # for super big ctgs...lots of different stuff needs to happen to reduce memory issues
+  max_ctg_pts = 70e6 # max points to process in any ctg using lasR at one time
   
-  ###_________________________###
-  ### set the size and buffer for gridded las tiles
-  ### gridded las tiles are used to process data in chuncks
-  ### if point density is very high, set grid res to 40-70
-  ###_________________________###
-  # las_grid_res_m = 100
-  # las_grid_buff_m = 10
-  las_grid_res_m = 100
-  las_grid_buff_m = 10
+  # this one is less important as never experienced memory issues with large areas (just lots of pts)
+  max_area_m2 = 90e3 # original = 90e3
   
+  #### This maximum filters the ground points to perform Delaunay triangulation
+  # see: https://github.com/r-lidar/lasR/issues/18#issuecomment-2027818414
+  max_pts_m2 = dplyr::case_when(
+    as.numeric(accuracy_level) <= 2 ~ 20 
+    , as.numeric(accuracy_level) == 3 ~ 100
+    , T ~ 20
+  )
+  ## at 100 pts/m2, the resulting CHM pixel values (0.25m resolution) are within -0.009% and 0.026% metres
+    # ... of the values obtained by using 400 pts/m2 with 99% probability
 #################################################################################
 #################################################################################
 # Setup
 #################################################################################
 #################################################################################
-  full_start_time = Sys.time()
   # bread-and-butter
   library(tidyverse) # the tidyverse
   library(viridis) # viridis colors
@@ -167,7 +199,7 @@
   ## !! lasR package not available on CRN
     ## uncomment to install from github see: https://r-lidar.github.io/lasR/index.html
     # library(pak)
-    # pak::pkg_install("r-lidar/lasR")
+    # pak::pkg_install("r-lidar/lasR", upgrade = T)
     library(lasR) # not available on CRAN as of 2024-01-20
   
   ## lidR::watershed requires EBImage::watershed 
@@ -226,23 +258,23 @@
   
     ### Set output directory for temporary files
     las_grid_dir = file.path(temp_dir, "00_grid")
-    las_denoise_dir = file.path(temp_dir, "0_denoise")
     las_classify_dir = file.path(temp_dir, "01_classify")
     las_normalize_dir = file.path(temp_dir, "02_normalize")
     dtm_dir = file.path(temp_dir, "03_dtm")
     chm_dir = file.path(temp_dir, "04_chm")
-    las_stem_dir = file.path(temp_dir, "05_las_stem")
-    stem_poly_tile_dir = file.path(temp_dir, "06_stem_poly_tile")
+    las_stem_norm_dir = file.path(temp_dir, "05_stem_norm")
+    las_stem_dir = file.path(temp_dir, "06_las_stem")
+    stem_poly_tile_dir = file.path(temp_dir, "07_stem_poly_tile")
     
     ### Create the directories
     dir.create(delivery_dir, showWarnings = FALSE)
     dir.create(temp_dir, showWarnings = FALSE)
     dir.create(las_grid_dir, showWarnings = FALSE)
-    dir.create(las_denoise_dir, showWarnings = FALSE)
     dir.create(las_classify_dir, showWarnings = FALSE)
     dir.create(las_normalize_dir, showWarnings = FALSE)
     dir.create(dtm_dir, showWarnings = FALSE)
     dir.create(chm_dir, showWarnings = FALSE)
+    dir.create(las_stem_norm_dir, showWarnings = FALSE)
     dir.create(las_stem_dir, showWarnings = FALSE)
     dir.create(stem_poly_tile_dir, showWarnings = FALSE)
     
@@ -256,11 +288,11 @@
     names(delivery_dir) = "delivery_dir"
     names(temp_dir) = "temp_dir"
     names(las_grid_dir) = "las_grid_dir"
-    names(las_denoise_dir) = "las_denoise_dir"
     names(las_classify_dir) = "las_classify_dir"
     names(las_normalize_dir) = "las_normalize_dir"
     names(dtm_dir) = "dtm_dir"
     names(chm_dir) = "chm_dir"
+    names(las_stem_norm_dir) = "las_stem_norm_dir"
     names(las_stem_dir) = "las_stem_dir"
     names(stem_poly_tile_dir) = "stem_poly_tile_dir"
     
@@ -270,9 +302,9 @@
     
     config = cbind(
       rootdir, input_las_dir, input_treemap_dir
-      , delivery_dir, temp_dir, las_grid_dir, las_denoise_dir, las_classify_dir
+      , delivery_dir, temp_dir, las_grid_dir, las_classify_dir
       , las_normalize_dir, dtm_dir, chm_dir
-      , las_stem_dir, stem_poly_tile_dir
+      , las_stem_norm_dir, las_stem_dir, stem_poly_tile_dir
     )
     
     config = as.data.frame(config)
@@ -284,28 +316,13 @@
   }
   # call the function
   config = create_project_structure(rootdir, input_las_dir)
+  
+  # remove all files in delivery and temp
+  list.files(config$temp_dir, recursive = T, full.names = T) %>%
+      purrr::map(file.remove)
+  # list.files(config$delivery_dir, recursive = T, full.names = T) %>%
+  #     purrr::map(file.remove)
 
-#################################################################################
-#################################################################################
-# Function to extract raster from list for use later
-#################################################################################
-#################################################################################
-  # extract only raster to work with
-  extract_rast_fn = function(x) {
-    if(class(x) == "SpatRaster"){
-      return(x)
-    } else if(
-        class(x) == "list"
-        & length(purrr::keep(x, inherits, "SpatRaster"))>=1
-      ){
-      r = purrr::keep(x, inherits, "SpatRaster") %>% 
-        # take the last raster
-        purrr::pluck(
-          length(purrr::keep(x, inherits, "SpatRaster"))
-        )
-      return(r)
-    }else{stop("No raster found")}
-  }
 #################################################################################
 #################################################################################
 # Function to create spatial index files (.lax) for classified las
@@ -314,39 +331,49 @@
   ## see: https://r-lidar.github.io/lidRbook/spatial-indexing.html
   ### Function to generate .lax index files for input directory path
   create_lax_for_tiles = function(las_file_list){
-    ans = 
-      las_file_list %>% 
-      purrr::map(function(des_file){
-        ### Compile the .lax file name
-        des_file_lax = tools::file_path_sans_ext(des_file)
-        des_file_lax = paste0(des_file_lax, ".lax")
-        
-        ### See if the .lax version exists in the input directory
-        does_file_exist = file.exists(des_file_lax)
-        # does_file_exist
-        
-        ### If file does_file_exist, do nothing
-        if(does_file_exist == TRUE){return(NULL)}
-        
-        ### If file doesnt exsist, create a .lax index
-        if(does_file_exist == FALSE){rlas::writelax(des_file)}
-      })
+      ans = 
+        las_file_list %>% 
+        purrr::map(function(des_file){
+          # check validity of data
+          l = rlas::read.lasheader(des_file) %>% length()
+          if(l==0 | is.na(l) | is.null(l)){
+            return(NULL)
+          }else{
+            ### Compile the .lax file name
+            des_file_lax = tools::file_path_sans_ext(des_file)
+            des_file_lax = paste0(des_file_lax, ".lax")
+            
+            ### See if the .lax version exists in the input directory
+            does_file_exist = file.exists(des_file_lax)
+            # does_file_exist
+            
+            ### If file does_file_exist, do nothing
+            if(does_file_exist == TRUE){return(des_file)}
+            
+            ### If file doesnt_file_exist, create a .lax index
+            if(does_file_exist == FALSE){
+              rlas::writelax(des_file)
+              return(des_file)
+            }
+          }
+        }) %>% unlist()
   }
 
 # start time
   xx1_tile_start_time = Sys.time()
 #################################################################################
 #################################################################################
-# Tile raw las files to work with smaller chunks
+# Tile raw las files to work with smaller chunks if needed
 #################################################################################
 #################################################################################
   # create spatial index files (.lax)
-    create_lax_for_tiles(
+    flist_temp = create_lax_for_tiles(
       las_file_list = list.files(config$input_las_dir, pattern = ".*\\.(laz|las)$", full.names = T)
     )
   ### point to input las files as a lidR LAScatalog (reads the header of all the LAS files of a given folder)
-    las_ctg = lidR::readLAScatalog(config$input_las_dir)
-  
+    las_ctg = lidR::readLAScatalog(flist_temp)
+  ### is this huge or what?
+    ctg_pts_so_many = sum(las_ctg@data$Number.of.point.records) > max_ctg_pts
   ###______________________________###
   # write las coverage data to delivery
   ###______________________________###
@@ -355,610 +382,665 @@
       , paste0(config$delivery_dir, "/raw_las_ctg_info.gpkg")
       , quiet = TRUE, append = FALSE
     )
-  
-  ### Pull the las extent geometry
-  las_grid = las_ctg@data$geometry %>% 
-      sf::st_union() %>% 
-      sf::st_make_grid(las_grid_res_m) %>% 
-      sf::st_as_sf() %>% 
-      dplyr::mutate(grid_id = dplyr::row_number())
-  ### define clip raw las to geometry with lasR pipeline
-    lasr_clip_polygon = function(
-        geometry, files, buffer, ofile_dir = tempdir()
-      ){
-        if(sf::st_geometry_type(geometry, FALSE) != "POLYGON"){ stop("Expected POLYGON geometry type")}
-        # get bbox of polygon
-        bbox = sf::st_bbox(geometry)
-        # file name
-        fnm = paste0(
-          ofile_dir
-          , "/"
-          , bbox[1]
-          , "_", bbox[2]
-          , "_", bbox[3]
-          , "_", bbox[4]
-          , "_tile.las"
-        )
-        # check file exists
-        if(file.exists(fnm)==T){stop("File exists")}
-        
-        # read las files with buffer step
-        read = lasR::reader_rectangles(
-          files
-          , xmin = bbox[1]
-          , ymin = bbox[2]
-          , xmax = bbox[3]
-          , ymax = bbox[4]
-          , filter = ""
-          , buffer = buffer
-        )
-        # write las files step
-        stage = lasR::write_las(ofile = fnm, filter = lasR::drop_duplicates(), keep_buffer = T)
-        # pass to lasR::processor
-        ans = lasR::processor(read+stage)
-        return(ans)
-      }
-    
-    # wrap in safe to eat error and continue processing
-      safe_lasr_clip_polygon = purrr::safely(lasr_clip_polygon)
-    # map function over all geometries
-      create_grid_las_list = 
-        las_grid %>% 
-          sf::st_geometry() %>% 
-          purrr::map(safe_lasr_clip_polygon, files = las_ctg, buffer = las_grid_buff_m, ofile_dir = config$las_grid_dir)
-    # create spatial index files (.lax)
-      create_lax_for_tiles(
-        las_file_list = list.files(config$las_grid_dir, pattern = ".*\\.(laz|las)$", full.names = T)
-      )
-    
-      # lidR::readLAScatalog(config$las_grid_dir)@data$geometry %>% 
-      #   sf::st_as_sf() %>% 
-      #   dplyr::mutate(id = dplyr::row_number()) %>% 
-      #     ggplot() +
-      #       geom_sf(aes(fill=as.factor(id)), alpha = 0.8) +
-      #       geom_sf(data = las_grid, color = "black", alpha = 0) +
-      #       scale_fill_viridis_d() +
-      #       theme_light() + theme(legend.position = "none")
-    
-    # clean up
-      remove(list = ls()[grep("_temp",ls())])
-      gc()
-      
-#################################################################################
-#################################################################################
-# Set up file names and proj epsg
-#################################################################################
-#################################################################################
   ###______________________________###
-  # set up lasR read file list
+  # crs
   ###______________________________###
-    raw_las_files = list.files(config$las_grid_dir, pattern = ".*\\.(laz|las)$", full.names = T)
-    
     # pull crs for using in write operations
-      # crs_list_temp = las_ctg@data$CRS
-      crs_list_temp = sf::st_crs(las_ctg)$epsg
-      
-      # handle missing epsg with user defined parameter
-      if(is.na(crs_list_temp) & !is.na(user_supplied_epsg)){
-        crs_list_temp = user_supplied_epsg
-        sf::st_crs(las_ctg) = paste0("EPSG:", user_supplied_epsg)
-      }
-      
-      if(length(unique(crs_list_temp))>1){stop("the raw las files have multiple CRS settings")}else{
-        proj_crs = paste0("EPSG:",unique(crs_list_temp))
-      }
-      
-    #switch to overwrite rasters if new data is created 
-      # (leave as F here even if first time executing)
-    overwrite_raster = F
-  
-  # clean up from setup to free some memory
-    # check_ls_size_fn(ls())
-    remove(
-      create_project_structure, create_grid_las_list
-      , lasr_clip_polygon, safe_lasr_clip_polygon, las_grid
-    )
-# start time
-  xx2_denoise_start_time = Sys.time()  
-#################################################################################
-#################################################################################
-# Denoise raw point cloud
-#################################################################################
-#################################################################################
-###______________________________###
-# check file lists
-###______________________________###
-  # classify
-  las_classify_flist = list.files(config$las_classify_dir, pattern = ".*_classify\\.(laz|las)$", full.names = T)
-  classify_lax_files = list.files(config$las_classify_dir, pattern = ".*_classify\\.lax$", full.names = T)
-# execute if
-if(
-  # do las and lax files already exist?
-  min(stringr::word(basename(raw_las_files),sep = "_tile") %in%
-    stringr::word(basename(las_classify_flist),sep = "_tile")) != 1
-  | min(stringr::word(basename(raw_las_files),sep = "_tile") %in%
-    stringr::word(basename(classify_lax_files),sep = "_tile")) != 1
-){
-  ###______________________________###
-  # denoise with lasR::classify_isolated_points
-  # in a lasR pipeline
-  ###______________________________###
-    # select raw files which do not have classified files
-    flist_temp = raw_las_files[which(
-      !stringr::word(basename(raw_las_files),sep = "_tile") %in%
-      stringr::word(basename(las_classify_flist),sep = "_tile")
-    )]
-    # create lasR pipeline to read raw las files and remove noise
-      # the function results in denoised las files written to specified directory
-    lasr_denoise_pipeline = function(
-      files
-      , ofile = paste0(tempdir(), "/*_denoise.las")
-    ){
-      lasR::processor(
-        lasR::reader(files) + 
-        lasR::classify_isolated_points(res =  5, n = 6) +  
-        lasR::write_las(ofile = ofile, filter = "-drop_noise -drop_duplicates")
-      )
+    # crs_list_temp = las_ctg@data$CRS
+    crs_list_temp = sf::st_crs(las_ctg)$epsg
+    
+    # handle missing epsg with user defined parameter
+    if(is.na(crs_list_temp) & !is.na(user_supplied_epsg)){
+      crs_list_temp = user_supplied_epsg
+      sf::st_crs(las_ctg) = paste0("EPSG:", user_supplied_epsg)
     }
     
-    # call the function and store outfile list to variable
-      # these files will be used for creating the classified las
-    las_denoise_flist = lasr_denoise_pipeline(
-      files = flist_temp
-      , ofile = paste0(config$las_denoise_dir, "/*_denoise.las")
-    )
-    
-    # create spatial index files (.lax)
-    create_lax_for_tiles(las_denoise_flist)
-    
-    # clean up
-    remove(list = ls()[grep("_temp",ls())])
-    gc()
-}
-# start time
-  xx3_classify_start_time = Sys.time()
-#################################################################################
-#################################################################################
-# Classify ground points
-#################################################################################
-#################################################################################
-###______________________________###
-# check file lists
-###______________________________###
-  # classify
-  las_classify_flist = list.files(config$las_classify_dir, pattern = ".*_classify\\.(laz|las)$", full.names = T)
-  classify_lax_files = list.files(config$las_classify_dir, pattern = ".*_classify\\.lax$", full.names = T)
-# execute if
-if(
-  # do las and lax files already exist?
-  min(stringr::word(basename(raw_las_files),sep = "_tile") %in%
-    stringr::word(basename(las_classify_flist),sep = "_tile")) != 1
-  | min(stringr::word(basename(raw_las_files),sep = "_tile") %in%
-    stringr::word(basename(classify_lax_files),sep = "_tile")) != 1
-){
-  ###______________________________###
-  # classify ground points
-  ###______________________________###
-    # There is no function in lasR to classify the points...create one
-      # the function results in classified las files written to specified directory
-    lasr_classify_pipeline = function(
-      files
-      , ofile = paste0(tempdir(), "/*_classify.las")
-      # csf parameters
-      , smooth = FALSE
-      , threshold = 0.5
-      , resolution = 0.5
-      , rigidness = 1L
-      , iterations = 500L
-      , step = 0.65
+    if(length(unique(crs_list_temp))>1){
+      stop("the raw las files have multiple CRS settings")
+    }else{
+      proj_crs = paste0("EPSG:",unique(crs_list_temp))
+    }
+  
+  ########################
+  # check for tile overlaps and so many points in whole catalog
+  # ...determines tiling and processing of grid subsets
+  ########################
+    ctg_chunk_data =
+      las_ctg@data %>%
+      dplyr::mutate(
+        area_m2 = sf::st_area(geometry) %>% as.numeric()
+        , pts = Number.of.point.records
+      ) %>% 
+      sf::st_drop_geometry() %>% 
+      dplyr::select(filename, area_m2, pts) %>% 
+      dplyr::ungroup() %>% 
+      dplyr::summarise(
+        dplyr::across(.cols = c(area_m2, pts), .fns = sum)
+      ) %>% 
+      # attach overall area
+      dplyr::bind_cols(
+        las_ctg@data$geometry %>%
+          sf::st_union() %>% 
+          sf::st_as_sf() %>% 
+          sf::st_set_geometry("geometry") %>% 
+          dplyr::mutate(
+            total_area_m2 = sf::st_area(geometry) %>% as.numeric()
+          ) %>% 
+          sf::st_drop_geometry()
+      ) %>% 
+      dplyr::mutate(
+        # so many points chunk size
+        # uneven distribution of points in ctg => some chunks bigger than max_ctg_pts
+        ctg_pt_factor = pts/(max_ctg_pts*0.2) #...so make much smaller
+        , chunk_max_ctg_pts = dplyr::case_when(
+            # no resize
+            ctg_pt_factor <= 1 ~ 0
+            # yes resize
+            , ctg_pt_factor > 1 ~ round(sqrt(area_m2/ctg_pt_factor), digits = -1) # round to nearest 10
+          )
+        , buffer_chunk_max_ctg_pts = ifelse(round(chunk_max_ctg_pts*0.05,digits=-1)<10,10,round(chunk_max_ctg_pts*0.05,digits=-1))
+        # overlap chunk size
+        , pct_overlap = (area_m2-total_area_m2)/total_area_m2
+        , area_factor = total_area_m2/max_area_m2
+        , pt_factor = pts/max_ctg_pts
+        , chunk_overlap = dplyr::case_when(
+            # no resize
+            area_factor <= 1 & pt_factor <= 1 ~ 0
+            # yes resize
+            , area_factor > 1 & pt_factor > 1 ~ min(
+              round(sqrt(area_m2/area_factor), digits = -1) # round to nearest 10
+              , round(sqrt(area_m2/pt_factor), digits = -1) # round to nearest 10
+            )
+            , area_factor > 1 ~ round(sqrt(area_m2/area_factor), digits = -1) # round to nearest 10
+            , pt_factor > 1 ~ round(sqrt(area_m2/pt_factor), digits = -1) # round to nearest 10
+          )
+        , buffer_overlap = ifelse(round(chunk_overlap*0.05,digits=-1)<10,10,round(chunk_overlap*0.05,digits=-1))
+      )
+    # ctg_chunk_data
+  ############################################################
+  ############################################################
+  # use ctg_chunk_data to determine chunking
+  ############################################################
+  ############################################################
+    # plot(las_ctg)
+    ########################
+    # split into grid subsets
+    # this is done for ctg's with sooo many points
+    # because lasR pipeline crashes memory and only way around it is 
+    # to break out las into separarte chunks (requires reading/writing much data ;()
+    # ....
+    # objective here is to break the ctg into lasR manageable subsets: each subset goes through lasR pipeline individually
+    # then bring the DTM and CHM results together via terra::sprc and mosaic, e.g.:
+      # # read
+      # rast_list = list.files("../data/", pattern = ".*\\.(tif|tiff)$", full.names = T) %>% purrr::map(function(x){terra::rast(x)})
+      # # mosaic
+      # rast_mosaic = terra::sprc(rast_list) %>% terra::mosaic(fun = "max")
+    ########################
+    if(
+      ctg_chunk_data$chunk_max_ctg_pts[1] > 0
+      & ctg_pts_so_many == T
     ){
-      # pass parmeters to the RCSF::CSF algorithm
-      csf = function(data, smooth, threshold, resolution, rigidness, iterations, step){
+      # if need to retile
+      # retile catalog
+      lidR::opt_progress(las_ctg) = F
+      lidR::opt_output_files(las_ctg) = paste0(config$las_grid_dir,"/", "_{XLEFT}_{YBOTTOM}") # label outputs based on coordinates
+      lidR::opt_filter(las_ctg) = "-drop_duplicates"
+      # buffering here because these grid subsets will be processed independently
+      lidR::opt_chunk_buffer(las_ctg) = 10
+      lidR::opt_chunk_size(las_ctg) = ctg_chunk_data$chunk_max_ctg_pts[1]
+      # reset las_ctg
+      lidR::catalog_retile(las_ctg) # apply retile
+      lidR::opt_progress(las_ctg) = T
+      # create spatial index
+      flist_temp = create_lax_for_tiles(
+        las_file_list = list.files(config$las_grid_dir, pattern = ".*\\.(laz|las)$", full.names = T)
+      )
+      # switch for processing grid subsets
+      grid_subset_switch = T
+    }else if( # retile whole catalog if high overlap
+      ctg_chunk_data$chunk_overlap[1] > 0
+      & ctg_chunk_data$pct_overlap[1] > 0.1
+    ){
+      # if need to retile
+      # retile catalog
+      lidR::opt_progress(las_ctg) = F
+      lidR::opt_output_files(las_ctg) = paste0(config$las_grid_dir,"/", "_{XLEFT}_{YBOTTOM}") # label outputs based on coordinates
+      lidR::opt_filter(las_ctg) = "-drop_duplicates"
+      # buffering is handled by lasR::exec so no need to buffer here
+      # not buffering here because these grid subsets will be processed altogether with buffer set for lasR::exec
+      lidR::opt_chunk_buffer(las_ctg) = 0
+      lidR::opt_chunk_size(las_ctg) = ctg_chunk_data$chunk[1]
+      # reset las_ctg
+      lidR::catalog_retile(las_ctg) # apply retile
+      lidR::opt_progress(las_ctg) = T
+      # create spatial index
+      flist_temp = create_lax_for_tiles(
+        las_file_list = list.files(config$las_grid_dir, pattern = ".*\\.(laz|las)$", full.names = T)
+      )
+      # switch for processing grid subsets
+      grid_subset_switch = F
+    }else{grid_subset_switch = F}
+      # flist_temp
+      # grid_subset_switch
+      # plot(lidR::readLAScatalog(flist_temp))
+      
+      # lidR::readLAScatalog(flist_temp)@data %>% 
+      #   dplyr::select(filename, Number.of.point.records) %>% 
+      #   sf::st_drop_geometry()
+  
+  ########################
+  # data on how the chunks are processed for writing
+  # get pct filter for creating dtm and normalized point clouds using triangulation
+  ########################
+    process_data =
+      lidR::readLAScatalog(flist_temp)@data %>%
+      dplyr::ungroup() %>% 
+      dplyr::mutate(
+        processing_grid = dplyr::case_when(
+          grid_subset_switch == T ~ dplyr::row_number()
+          , T ~ 1
+        )
+        , area_m2 = sf::st_area(geometry) %>% as.numeric()
+        , pts = Number.of.point.records
+        , pts_m2 = pts/area_m2
+      ) %>% 
+      dplyr::select(processing_grid, filename, area_m2, pts, pts_m2) %>% 
+      # get rid of tiny edge files with very few points which cannot be utilized for delauny triangulation
+        # !!!!!!!!!!!!!!! upgrade to remove tiles completely spatially covered by other tiles
+      dplyr::filter(pts>max_ctg_pts*0.0001) %>% 
+      # sometimes there are super small chunks created which can lead to 0 points after filtering for performing calcs
+      dplyr::mutate(
+        processing_grid = dplyr::case_when(
+          pts < max_ctg_pts*0.0002 & !is.na(dplyr::lag(pts)) & !is.na(dplyr::lead(pts)) & 
+            dplyr::lag(pts) < dplyr::lead(pts) ~ dplyr::lag(processing_grid)
+          , pts < max_ctg_pts*0.0002 & !is.na(dplyr::lag(pts)) & !is.na(dplyr::lead(pts)) & 
+            dplyr::lag(pts) > dplyr::lead(pts) ~ dplyr::lead(processing_grid)
+          , pts < max_ctg_pts*0.0002 & !is.na(dplyr::lag(pts)) ~ dplyr::lag(processing_grid)
+          , pts < max_ctg_pts*0.0002 & !is.na(dplyr::lead(pts)) ~ dplyr::lead(processing_grid)
+          , T ~ processing_grid
+        )
+      ) %>% 
+      dplyr::group_by(processing_grid) %>% 
+      dplyr::mutate(
+        pts_m2 = pts/area_m2
+      # calculate factor to reduce by for triangulation
+        , pts_m2_factor_optimal = dplyr::case_when(
+            max_pts_m2/pts_m2 >= 1 ~ 1
+            , TRUE ~ max_pts_m2/pts_m2
+        )
+        # area based weighted mean
+          # pass this to filter_for_dtm
+        , pts_m2_factor_ctg = max(stats::weighted.mean(
+            x = pts_m2_factor_optimal
+            , w = area_m2/sum(area_m2)
+          ) %>% 
+          round(digits = 2),0.01)
+        , filtered_pts_m2 = pts_m2*pts_m2_factor_ctg
+        , processing_grid_tot_pts = sum(pts)
+      ) %>% 
+      dplyr::ungroup()
+    
+    # plot
+    process_data %>% 
+      dplyr::group_by(processing_grid) %>%
+      dplyr::mutate(lab = pts == max(pts)) %>%
+      ggplot() +
+        geom_sf(aes(fill = as.factor(processing_grid)), alpha = 0.6) +
+        geom_sf_text(aes(label = ifelse(lab,as.factor(processing_grid), ""))) +
+        scale_fill_manual(
+          values =
+            viridis::turbo(n=length(process_data$processing_grid %>% unique())) %>% 
+            sample() 
+        ) +
+        labs(x="",y="",title="processing_grid") +
+        theme_light() +
+        theme(legend.position = "none")
+    # # count
+    # process_data %>%
+    #   dplyr::distinct(processing_grid, processing_grid_tot_pts)
+    
+  # save processing attributes
+    sf::st_write(
+      process_data
+      , paste0(config$delivery_dir, "/process_data_las_tiling.gpkg")
+      , quiet = TRUE, append = FALSE
+    )
+  # clean up
+    remove(list = ls()[grep("_temp",ls())])
+    # clean up from setup to free some memory
+    # check_ls_size_fn(ls())
+    remove(create_project_structure)
+    gc()
+      
+# start time
+  xx2_class_dtm_norm_chm_start_time = Sys.time()  
+#################################################################################
+#################################################################################
+# lasR pipeline does it all:
+  # classify points = RCSF::CSF
+  # denoise = lasR::classify_isolated_points
+  # DTM with delauny triangulation = lasR::triangulate
+  # normalize = lasR::triangulate or based on DTM (see accuracy_level)
+  # CHM based on classified and normalized points with user-defined min/max heights
+#################################################################################
+#################################################################################
+  ######################################
+  # DEFINE ALL lasR pipeline steps
+  ######################################
+  ###################
+  # read with filter
+  ###################
+    lasr_read = lasR::reader_las(filter = "-drop_noise -drop_duplicates")
+    # lasr_read = lasR::reader_las()
+  ###################
+  # classify
+  ###################
+  ## !!!!!!!!!!!!!!!! using lasR, but NOT using lasR...
+    # Classify pipelines use lasR::callback() that exposes the point cloud as a data.frame. 
+    # One of the reasons why lasR is more memory-efficient and faster than lidR is that it 
+    # does not expose the point cloud as a data.frame. Thus, these pipelines are not very different 
+    # from the lidR::classify_ground() function in lidR. 
+    # The advantage of using lasR here is the ability to pipe different stages.
+    # There is no function in lasR to classify the points...create one
+    ################
+    # library(RCSF) # for the Cloth simulation filtering (CSF) (Zhang et al 2016) algorithm to classify points
+    ################
+    lasr_classify_csf = function(
+      # csf options
+      smooth = FALSE, threshold = 0.5
+      , resolution = 0.5, rigidness = 1L
+      , iterations = 500L, step = 0.65
+    ){
+      csf = function(data, smooth, threshold, resolution, rigidness, iterations, step)
+      {
         id = RCSF::CSF(data, smooth, threshold, resolution, rigidness, iterations, step)
         class = integer(nrow(data))
         class[id] = 2L
-        data$Classification <- class
+        data$Classification = class
         return(data)
       }
-      # wrap in lasR::callback
-        # if the output is a data.frame with the same number of points, it updates the point cloud
+      
       classify = lasR::callback(
         csf
         , expose = "xyz"
+        # csf options
         , smooth = smooth, threshold = threshold
         , resolution = resolution, rigidness = rigidness
         , iterations = iterations, step = step
       )
-      # define pipeline
-      pipeline = lasR::reader(files, filter = "-drop_noise -drop_duplicates") + 
-        classify +
-        lasR::write_las(ofile = ofile)
-      # pass to lasR::processor or return
-      lasR::processor(pipeline)
-      # return(pipeline)
+      return(classify)
     }
+  # send it to pipeline with defaults
+    lasr_classify = lasr_classify_csf(
+        # csf options
+        smooth = FALSE, threshold = 0.5
+        , resolution = 0.5, rigidness = 1L
+        , iterations = 500L, step = 0.65
+      )
+  ###################
+  # denoise
+  ###################
+    # classify isolated points
+    lasr_denoise = lasR::classify_isolated_points(res =  5, n = 6)
+    # lasr_denoise_filter = lasR::delete_points(filter = lasR::drop_noise())
     
-    # call the function and store outfile list to variable
-      # these files will be used for creating the DTM and height normalizing
-    las_classify_flist = lasr_classify_pipeline(
-      files = las_denoise_flist
-      , ofile = paste0(config$las_classify_dir, "/*_classify.las")
+    # classify write step after denoise
+    lasr_write_classify = lasR::write_las(
+        ofile = paste0(config$las_classify_dir, "/*_classify.las")
+        # ofile = paste0(config$las_classify_dir, "/*_classify.las")
+        , filter = "-drop_noise"
+        , keep_buffer = F
+      )
+  ###################
+  # dtm + normalize
+  ###################
+    lasr_dtm_norm_fn = function(
+      dtm_file_name = paste0(config$delivery_dir, "/dtm_", desired_dtm_res, "m.tif")
+      , frac_for_tri = 1
+      , dtm_res = desired_dtm_res
+      , norm_accuracy = accuracy_level
+    ){
+      # perform Delaunay triangulation
+        # tri = lasR::triangulate(filter = "-keep_class 2 -keep_class 9 -keep_random_fraction 0.01")
+        ####
+        # set filter based on # points
+        ####
+        filter_for_dtm = paste0(
+          "-drop_noise -keep_class 2 -keep_class 9 -keep_random_fraction "
+          , ifelse(frac_for_tri>=1, "1", scales::comma(frac_for_tri, accuracy = 0.01))
+        )
+        ####
+        # triangulate with filter
+        ####
+        lasr_triangulate = lasR::triangulate(
+          # class 2 = ground; class 9 = water
+          filter = filter_for_dtm
+          , max_edge = 0
+          # , max_edge = c(0,1)
+          # # write to disk to preserve memory
+          , ofile = ""
+          # , ofile = paste0(config$las_denoise_dir, "/", "*_tri.gpkg")
+        )
+      # rasterize the result of the Delaunay triangulation
+        lasr_dtm = lasR::rasterize(
+          res = dtm_res
+          , operators = lasr_triangulate
+          , filter = lasR::drop_noise()
+          # # write to disk to preserve memory
+          , ofile = dtm_file_name
+        ) 
+      # normalize
+      # stage = triangulate: takes foreevvveerrrrrrr
+        # ... but see: https://github.com/r-lidar/lasR/issues/18#issuecomment-2027818414
+        ## at this density of point, my advice is anyway to decimate your ground points. 
+        ## With 1/100 of the ground points you already have 5 ground pts/m2 to compute a 
+        ## DTM with a 1 m resolution! You could even decimate to 1/250. 
+        ## This will solve your computation time issue in the same time.
+        ## stage = dtm
+          # ... see: https://github.com/r-lidar/lasR/issues/17#issuecomment-2027698100
+          # also from the lidR book https://r-lidar.github.io/lidRbook/norm.html:
+            ## "Point cloud normalization without a DTM interpolates the elevation of 
+            ## every single point locations using ground points. It no longer uses elevations 
+            ## at discrete predefined locations. Thus the methods is exact, computationally speaking. 
+            ## It means that it is equivalent to using a continuous DTM but it is important 
+            ## to recall that all interpolation methods are interpolation and by definition 
+            ## make guesses with different strategies. Thus by “exact” we mean “continuous”.
+        if(as.numeric(norm_accuracy) %in% c(2,3)){
+          lasr_normalize = lasR::transform_with(
+            stage = lasr_triangulate
+            , operator = "-"
+          )
+        }else{
+          lasr_normalize = lasR::transform_with(
+            stage = lasr_dtm
+            , operator = "-"
+          )
+        }
+      # pipeline
+      pipeline = lasr_triangulate + lasr_dtm + lasr_normalize
+      return(pipeline)
+    }
+  # gets sent to pipeline later with options based on process_data
+  # write
+    lasr_write_normalize = lasR::write_las(
+      filter = "-drop_z_below 0 -drop_class 2 9 18"
+      , ofile = paste0(config$las_normalize_dir, "/*_normalize.las")
+      , keep_buffer = F
     )
+  ###################
+  # chm
+  ###################
+    lasr_chm_fn = function(
+     chm_file_name = paste0(config$delivery_dir, "/chm_", desired_chm_res, "m.tif") 
+     , chm_res = desired_chm_res
+     , min_height_m = minimum_tree_height_m
+     , max_height_m = max_height_threshold_m
+    ){
+      # chm
+        #set up chm pipeline step
+        # operators = "max" is analogous to `lidR::rasterize_canopy(algorithm = p2r())`
+        # for each pixel of the output raster the function attributes the height of the highest point found
+        lasr_chm = lasR::rasterize(
+          res = chm_res
+          , operators = "max"
+          , filter = paste0(
+            "-drop_class 2 9 18 -drop_z_below "
+            , min_height_m
+            , " -drop_z_above "
+            , max_height_m
+          )
+          , ofile = ""
+          # , ofile = paste0(config$chm_dir, "/*_chm.tif")
+        )
+      # Pits and spikes filling for raster with algorithm from St-Onge 2008 (see reference).
+        lasr_chm_pitfill = lasR::pit_fill(raster = lasr_chm, ofile = chm_file_name)
+      # pipeline
+        pipeline = lasr_chm + lasr_chm_pitfill
+        return(pipeline)
+    }
+  # gets sent to pipeline later with options based on process_data
+    
+  ######################################
+  # lasR full pipeline
+  ######################################
+  # map over process_data$processing_grid
+  lasr_pipeline_fn = function(
+    processing_grid_num = 1
+    , keep_intrmdt = keep_intermediate_files
+    # lasr_dtm_norm_fn
+    , dtm_res_m = desired_dtm_res
+    , normalization_accuracy = accuracy_level
+    # lasr_chm_fn
+     , chm_res_m = desired_chm_res
+     , min_height = minimum_tree_height_m
+     , max_height = max_height_threshold_m
+  ){
+    # output files
+    dtm_file_name = paste0(config$dtm_dir, "/", processing_grid_num,"_dtm_", dtm_res_m, "m.tif")
+    chm_file_name = paste0(config$chm_dir, "/", processing_grid_num,"_chm_", chm_res_m, "m.tif")
+    # files to process
+    flist = process_data %>% 
+      dplyr::filter(processing_grid == processing_grid_num) %>% 
+      dplyr::pull(filename)
+    # set up catalog
+      tile_las_ctg = lidR::readLAScatalog(flist)
+      lidR::opt_chunk_buffer(tile_las_ctg) = 10
+      lidR::opt_chunk_size(tile_las_ctg) = 0
+    # fraction for triangulation
+    frac_for_tri = process_data %>% 
+      dplyr::filter(processing_grid == processing_grid_num) %>% 
+      dplyr::pull(pts_m2_factor_ctg) %>% 
+      .[1]
+    ################
+    # buld pipeline
+    ################
+    if(keep_intrmdt == T){
+      # pipeline
+        lasr_pipeline_temp = lasr_read +
+          lasr_classify +
+          lasr_denoise +
+          lasr_write_classify +
+          lasr_dtm_norm_fn(
+            dtm_file_name = dtm_file_name
+            , frac_for_tri = frac_for_tri
+            , dtm_res = dtm_res_m
+            , norm_accuracy = normalization_accuracy
+          ) + 
+          lasr_write_normalize +
+          lasr_chm_fn(
+            chm_file_name = chm_file_name
+             , chm_res = chm_res_m
+             , min_height_m = min_height
+             , max_height_m = max_height
+          )
+    }else{
+      # pipeline
+        lasr_pipeline_temp = lasr_read +
+          lasr_classify +
+          lasr_denoise +
+          lasr_dtm_norm_fn(
+            dtm_file_name = dtm_file_name
+            , frac_for_tri = frac_for_tri
+            , dtm_res = dtm_res_m
+            , norm_accuracy = normalization_accuracy
+          ) + 
+          lasr_write_normalize +
+          lasr_chm_fn(
+            chm_file_name = chm_file_name
+             , chm_res = chm_res_m
+             , min_height_m = min_height
+             , max_height_m = max_height
+          )
+    }
+    # message
+    message(
+      "starting lasR processing of processing grid "
+      , processing_grid_num
+      , " ("
+      , process_data %>% 
+        dplyr::filter(processing_grid == processing_grid_num) %>% 
+        dplyr::pull(processing_grid_tot_pts) %>% 
+        .[1] %>% 
+        scales::comma(accuracy = 1)
+      , " pts) at ..."
+      , Sys.time()
+    )
+    # lasR execute
+    lasr_ans = lasR::exec(
+      lasr_pipeline_temp
+      , on = tile_las_ctg
+      , with = list(
+        progress = T
+      )
+    )
+    # sleep
+    Sys.sleep(4) # sleep to give c++ stuff time to reset
+    return(lasr_ans)
+  }
+      
+  ######################################
+  # execute pipeline
+  ######################################
+    # set lasR parallel processing options as of lasR 0.4.2
+      lasR::set_parallel_strategy(
+        strategy = lasR::concurrent_points(
+            ncores = max(lasR::ncores()-1, lasR::half_cores())
+          )
+      )
+    # map over processing grids
+      lasr_ans_list = 
+        process_data$processing_grid %>%
+        unique() %>%
+        purrr::map(lasr_pipeline_fn) 
+        
+    # clean up
+      remove(list = ls()[grep("_temp",ls())])
+      gc()
+  ###################################
+  # lasR cleanup and polish
+  ###################################
+    ###############
+    # DTM 
+    ###############
+      # output name
+      dtm_file_name = paste0(config$delivery_dir, "/dtm_", desired_dtm_res, "m.tif")
+      # read
+      rast_list_temp = list.files(config$dtm_dir, pattern = ".*\\.(tif|tiff)$", full.names = T) %>% purrr::map(function(x){terra::rast(x)})
+      # mosaic
+      dtm_rast = terra::sprc(rast_list_temp) %>% terra::mosaic(fun = "mean")
+      # fill empty cells
+        dtm_rast = dtm_rast %>%
+          terra::crop(
+            las_ctg@data$geometry %>%
+              sf::st_union() %>%
+              terra::vect() %>%
+              terra::project(terra::crs(dtm_rast))
+          ) %>%
+          terra::mask(
+            las_ctg@data$geometry %>%
+              sf::st_union() %>%
+              terra::vect() %>%
+              terra::project(terra::crs(dtm_rast))
+          ) %>%
+          terra::focal(
+            w = 3
+            , fun = "mean"
+            , na.rm = T
+            # na.policy Must be one of:
+              # "all" (compute for all cells)
+              # , "only" (only for cells that are NA)
+              # , or "omit" (skip cells that are NA).
+            , na.policy = "only"
+          )
+        # dtm_rast %>% terra::crs()
+        # dtm_rast %>% terra::plot()
+      # set crs
+        terra::crs(dtm_rast) = proj_crs
+      # write to delivery directory
+        terra::writeRaster(
+          dtm_rast
+          , filename = dtm_file_name
+          , overwrite = T
+        )
+    ###############
+    # chm 
+    ###############
+      # output name
+      chm_file_name = paste0(config$delivery_dir, "/chm_", desired_chm_res, "m.tif")
+      # read
+      rast_list_temp = list.files(config$chm_dir, pattern = ".*\\.(tif|tiff)$", full.names = T) %>% purrr::map(function(x){terra::rast(x)})
+      # mosaic
+      chm_rast = terra::sprc(rast_list_temp) %>% terra::mosaic(fun = "max")
+      # fill empty cells
+        chm_rast = chm_rast %>%
+          terra::crop(
+            las_ctg@data$geometry %>%
+              sf::st_union() %>%
+              terra::vect() %>%
+              terra::project(terra::crs(chm_rast))
+          ) %>%
+          terra::mask(
+            las_ctg@data$geometry %>%
+              sf::st_union() %>%
+              terra::vect() %>%
+              terra::project(terra::crs(chm_rast))
+          ) %>%
+          terra::focal(
+            w = 3
+            , fun = "mean"
+            , na.rm = T
+            # na.policy Must be one of:
+              # "all" (compute for all cells)
+              # , "only" (only for cells that are NA)
+              # , or "omit" (skip cells that are NA).
+            , na.policy = "only"
+          )
+        # chm_rast %>% terra::crs()
+        # chm_rast %>% terra::plot()
+      # set crs
+        terra::crs(chm_rast) = proj_crs
+      # write to delivery directory
+        terra::writeRaster(
+          chm_rast
+          , filename = chm_file_name
+          , overwrite = T
+        )
     
     # create spatial index files (.lax)
-    create_lax_for_tiles(las_classify_flist)
-    
-    # las_classify_flist
-    # lidR::readLAS(las_classify_flist[1]) %>% plot(color = "Classification")
-    # lidR::readLAS(las_classify_flist[1])@data %>% dplyr::count(Classification)
-    
-    # clean up
-    remove(list = ls()[grep("_temp",ls())])
-    gc()
-    
-    #switch to overwrite rasters since this section created new data
-    overwrite_raster = T
-}
-# start time
-  xx4_dtm_start_time = Sys.time()
-#################################################################################
-#################################################################################
-# Create digital terrain model (DTM) raster
-#################################################################################
-#################################################################################
-###______________________________###
-# check file lists
-###______________________________###
-  # rasters
-  dtm_file_name = paste0(config$delivery_dir, "/dtm_", desired_dtm_res, "m.tif")
-# execute if
-if(
-  file.exists(dtm_file_name) == F
-  | overwrite_raster == T
-){
-  ###______________________________###
-  # create DTM raster using Delaunay triangulation and pit fill
-  ###______________________________###
-    # the function results in pitfilled dtm files written to specified directory and...
-      # a mosaic'd dtm for all files included
-      # smooth the mosaic'd dtm to fill na's and write to delivery directory with crs
-      
-    # note, this section throws the MESSAGE:
-        # ERROR 1: PROJ: proj_create_from_database: Cannot find proj.db
-        # no documentation on this error or how to fix...
-        # this is caused by lasR::write_las not writing with crs
-        # this script attaches the crs when creating a rater mosaic of entire extent
-    ######## BUT THE PROCESS EXECUTES FINE (UNLESS A DIFFERENT MESSAGE IS RETURNED)
-    ######## !!!!! SO DON'T WORRY ABOUT IT ;D
-  
-    lasr_dtm_pipeline = function(
-      files
-      , ofile = paste0(tempdir(), "/*_dtm_1m.tif")
-      # dtm parameters
-      , res = 1
-      , max_edge = 0
-      , add_class = NULL
-    ){
-      # set up filter
-      filter = lasR::keep_ground()
-      if (!is.null(add_class)) filter = filter + lasR::keep_class(add_class)
-      # Delaunay triangulation
-      tri = lasR::triangulate(max_edge = max_edge, filter = filter)
-      # rasterize the result of the Delaunay triangulation
-      rast = lasR::rasterize(res = res, tri)
-      # Pits and spikes filling for raster with algorithm from St-Onge 2008 (see reference).
-      pit = lasR::pit_fill(raster = rast, ofile = ofile)
-      # define pipeline
-      pipeline = tri + rast + pit
-      # pass to lasR::processor or return
-      ans = lasR::processor(lasR::reader(files, filter = filter) + pipeline)
-      return(ans)
-      
-    }
-    
-    # call the function and store outfile list to variable
-      # these files will be used to mosaic over full extent
-    las_dtm_flist = lasr_dtm_pipeline(
-      files = list.files(config$las_classify_dir, pattern = ".*_classify\\.(laz|las)$", full.names = T)
-      , ofile = paste0(config$dtm_dir, "/*_dtm_", desired_dtm_res, "m.tif")
-      # , ofile = ""
-      , res = desired_dtm_res
-      , max_edge = c(0,1)
-      , add_class = 9 # include water in dtm
-    )
-    
-    # extract raster from result
-    dtm_rast = extract_rast_fn(las_dtm_flist)
-    # dtm_rast %>% terra::plot()
-
-    # fill cells that are missing still with the mean of a window
-      dtm_rast = dtm_rast %>%
-        terra::focal(
-          w = 3
-          , fun = "mean"
-          , na.rm = T
-          # na.policy Must be one of:
-            # "all" (compute for all cells)
-            # , "only" (only for cells that are NA)
-            # , or "omit" (skip cells that are NA).
-          , na.policy = "only"
-        )
-    # set crs
-      terra::crs(dtm_rast) = proj_crs
-      # dtm_rast %>% terra::crs()
-      # dtm_rast %>% terra::plot()
-    
-    # write to delivery directory
-      terra::writeRaster(
-        dtm_rast
-        , filename = dtm_file_name
-        , overwrite = T
+      # classify
+      create_lax_for_tiles(
+        las_file_list = list.files(config$las_classify_dir, pattern = ".*\\.(laz|las)$", full.names = T)
       )
-      
-      # dtm_file_name %>% 
-      #   terra::rast() %>% 
-      #   terra::crs()
-      #   plot()
-    
-    # clean up
-    remove(list = ls()[grep("_temp",ls())])
-    remove(las_dtm_flist)
-    gc()
-}else if(file.exists(dtm_file_name) == T){
-  dtm_rast = terra::rast(dtm_file_name)
-}
-# start time
-  xx5_normalize_start_time = Sys.time()
-#################################################################################
-#################################################################################
-# Height normalize points 
-#################################################################################
-#################################################################################
-###______________________________###
-# check file lists
-###______________________________###
-  # classify
-  las_classify_flist = list.files(config$las_classify_dir, pattern = ".*_classify\\.(laz|las)$", full.names = T)
-  # normalize
-  las_normalize_flist = list.files(config$las_normalize_dir, pattern = ".*_normalize\\.(laz|las)$", full.names = T)
-  normalize_lax_files = list.files(config$las_normalize_dir, pattern = ".*_normalize\\.lax$", full.names = T)
-# execute if
-if(
-  # do las and lax files already exist?
-  min(stringr::word(basename(las_classify_flist),sep = "_tile") %in%
-    stringr::word(basename(las_normalize_flist),sep = "_tile")) != 1
-  | min(stringr::word(basename(las_classify_flist),sep = "_tile") %in%
-    stringr::word(basename(normalize_lax_files),sep = "_tile")) != 1
-){
-  # select raw files which do not have classified files
-    flist_temp = las_classify_flist[which(
-      !stringr::word(basename(las_classify_flist),sep = "_tile") %in%
-      stringr::word(basename(las_normalize_flist),sep = "_tile")
-    )]
-  
-  ### define function to normalize files either in parallel or not and call the function
-  ### either path results in normalized files written to config$las_normalize_dir
-  if(use_parallel_processing == T){
-    # Error in unserialize(socklist[[n]]) : error reading from connection
-      # means that one of the workers died when trying to process...try restarting
-    ###______________________________________________________________________________________###
-    ### In parallel height normalize across the tiles and rewrite them ###
-    ###______________________________________________________________________________________###
-    las_normalize_fn <- function(las_file_dir, out_dir, dtm=NULL) {
-    
-      ### Get a list of tiled files to ground classify
-      lidar_list = list.files(las_file_dir, pattern = ".*\\.(laz|las)$", full.names = F)
-      
-      # configure parallel
-      cores = parallel::detectCores()
-      cluster = parallel::makeCluster(cores-1)
-      # register the parallel backend with the `foreach` package
-      doParallel::registerDoParallel(cluster)
-      # pass to foreach to process each lidar file in parallel
-        # for (i in 1:length(lidar_list)) {
-        foreach::foreach(
-          i = 1:length(lidar_list)
-          , .packages = c("tools","lidR","tidyverse","doParallel")
-          , .inorder = F
-        ) %dopar% {
-          
-          ### Get the desired lidar tile
-          des_tile_name = lidar_list[i]
-          # des_tile_name
-          
-          ### Has the file been generated already?
-          des_out_tile = paste0(
-            out_dir
-            , "/"
-            , tools::file_path_sans_ext(des_tile_name)
-            , "_normalize.las"
-          )
-          
-          does_file_exist = file.exists(des_out_tile)
-          
-          ### If file exists, skip
-          if(does_file_exist == TRUE){
-            # message("normalized tile ", des_out_tile, " exists so skipped it ... ")
-            return(NULL)
-          }
-  
-          ### If file does not exist height normalize
-          if(does_file_exist == FALSE){
-  
-            ### Read in the lidar tile
-              las_tile = lidR::readLAS(paste0(
-                las_file_dir
-                , "/"
-                , des_tile_name
-              ))
-            ### Height normalize the file
-              if(class(dtm) == "SpatRaster"){
-                las_tile = lidR::normalize_height(las_tile, algorithm = dtm)
-              }else{
-                las_tile = lidR::normalize_height(las_tile, algorithm = knnidw())
-              }
-            ### Remove points below 0.05
-              las_tile = lidR::filter_poi(las_tile, Z >= 0)
-              
-            ### Overwrite the existing file
-            if(!is.null(las_tile) & !lidR::is.empty(las_tile)){
-              ### Overwrite the existing file
-                lidR::writeLAS(
-                  las_tile
-                  , file = des_out_tile
-                )
-            }
-          }
-        } # end foreach
-      # turn of parallel cluster
-      parallel::stopCluster(cluster)
-    }
-    
-    # call the function
-    las_normalize_fn(
-      las_file_dir = config$las_classify_dir
-      , out_dir = config$las_normalize_dir
-      , dtm = NULL
-    )
-  }else{
-    # define function to normalize files using lidR LAScatalog
-    las_normalize_fn = function(in_dir_or_flist, out_dir){
-      # set up las ctg
-      las_classify_ctg = lidR::readLAScatalog(in_dir_or_flist)
-      # redirect results to output 
-      lidR::opt_output_files(las_classify_ctg) = paste0(out_dir, "/{*}_normalize")
-      # turn off early exit
-      lidR::opt_stop_early(las_classify_ctg) = FALSE
-      # turn off early exit
-      lidR::opt_progress(las_classify_ctg) = FALSE
       # normalize
-      las_normalize_ans = lidR::normalize_height(las_classify_ctg, algorithm = knnidw())
-      gc()
-    }
-    
-    # call the function
-    las_normalize_fn(
-      in_dir_or_flist = flist_temp
-      # in_dir_or_flist = config$las_classify_dir
-      , out_dir = config$las_normalize_dir
-    )
-  } # end else if use_parallel_processing
-  
-  # get file list
-  las_normalize_flist = list.files(config$las_normalize_dir, pattern = ".*\\.(laz|las)$", full.names = T)
-  
-  # create spatial index files (.lax)
-  create_lax_for_tiles(las_normalize_flist)
-  
-  # list.files(las_normalize_flist)[1] %>% 
-  #   lidR::readLAS() %>% 
-  #   plot()
-
-  # clean up
-    remove(list = ls()[grep("_temp",ls())])
-    gc()
-  
-  #switch to overwrite rasters since this section created new data
-    overwrite_raster = T
-}
-# start time
-  xx6_chm_start_time = Sys.time()
-#################################################################################
-#################################################################################
-# Create canopy height model (CHM) raster in lasR pipeline
-#################################################################################
-#################################################################################
-###______________________________###
-# check file lists
-###______________________________###
-  chm_file_name = paste0(config$delivery_dir, "/chm_", desired_chm_res, "m.tif")
-# execute if
-if(
-  file.exists(chm_file_name) == F
-  | overwrite_raster == T
-){
-    # note, this section throws the MESSAGE:
-        # ERROR 1: PROJ: proj_create_from_database: Cannot find proj.db
-        # no documentation on this error or how to fix...
-        # this is caused by lasR::write_las not writing with crs
-        # this script attaches the crs when creating a rater mosaic of entire extent
-    ######## BUT THE PROCESS EXECUTES FINE (UNLESS A DIFFERENT MESSAGE IS RETURNED)
-    ######## !!!!! SO DON'T WORRY ABOUT IT ;D
-    
-    #set up chm pipeline step
-      # operators = "max" is analogous to `lidR::rasterize_canopy(algorithm = p2r())`
-      # for each pixel of the output raster the function attributes the height of the highest point found
-      lasr_chm_step = lasR::rasterize(
-        res = desired_chm_res
-        , operators = "max"
-        , filter = paste0(
-          "-drop_class 2 9 -drop_z_below "
-          , minimum_tree_height_m
-          , " -drop_z_above "
-          , max_height_threshold_m
-        )
+      normalize_flist = create_lax_for_tiles(
+        las_file_list = list.files(config$las_normalize_dir, pattern = ".*\\.(laz|las)$", full.names = T)
       )
-    # Pits and spikes filling for raster with algorithm from St-Onge 2008 (see reference).
-      lasr_chm_pit_step = lasR::pit_fill(
-        raster = lasr_chm_step
-        # , ofile = paste0(config$chm_dir, "/*_chm.tif")
-        , ofile = ""
-      )
-    
-    # list of normalized files to use 
-    las_normalize_flist = list.files(config$las_normalize_dir, pattern = ".*_normalize\\.(laz|las)$", full.names = T)
-      
-    # build and execute lasR::processor
-      # these files will be used for detecting tree tops and tree crowns
-    las_chm_flist = lasR::processor(
-        lasR::reader(las_normalize_flist, filter = "-drop_z_below 0") + 
-        # create chm
-        lasr_chm_step +
-        # pitfill chm
-        lasr_chm_pit_step
-      )
-    
-    # extract raster from result
-    chm_rast = extract_rast_fn(las_chm_flist)
-    # chm_rast %>% terra::plot()
-
-    # fill cells that are missing still with the mean of a window
-      chm_rast = chm_rast %>%
-        terra::focal(
-          w = 3
-          , fun = "mean"
-          , na.rm = T
-          # na.policy Must be one of:
-            # "all" (compute for all cells)
-            # , "only" (only for cells that are NA)
-            # , or "omit" (skip cells that are NA).
-          , na.policy = "only"
-        )
-    # set crs
-      terra::crs(chm_rast) = proj_crs
-      # chm_rast %>% terra::crs()
-      # chm_rast %>% terra::plot()
-    
-    # write to delivery directory
-      terra::writeRaster(
-        chm_rast
-        , filename = chm_file_name
-        , overwrite = T
-      )
-      
-      # chm_file_name %>% 
-      #   terra::rast() %>% 
-      #   terra::crs()
-      #   plot()
     
     # clean up
-    remove(list = ls()[grep("_temp",ls())])
-    remove(list = ls()[grep("_step",ls())])
-    remove(las_chm_flist)
-    gc()
-}else if(file.exists(chm_file_name) == T){
-  chm_rast = terra::rast(chm_file_name)
-}
+      remove(list = ls()[grep("_temp",ls())])
+      gc()
+    
+    # # # plots
+    # dtm_rast %>%
+    #   # terra::aggregate(fact = 4) %>%
+    #   as.data.frame(xy = T) %>%
+    #   dplyr::rename(f=3) %>%
+    #   ggplot() +
+    #     geom_tile(aes(x=x,y=y,fill=f)) +
+    #     geom_sf(data = las_ctg@data$geometry, fill = NA) +
+    #     scale_fill_viridis_c(option = "viridis") +
+    #     labs(fill = "meters") +
+    #     theme_void()
+    # chm_rast %>%
+    #   as.data.frame(xy = T) %>%
+    #   dplyr::rename(f=3) %>%
+    #   ggplot() +
+    #     geom_tile(aes(x=x,y=y,fill=f)) +
+    #     geom_sf(data = las_ctg@data$geometry, fill = NA) +
+    #     scale_fill_viridis_c(option = "plasma") +
+    #     labs(fill = "meters") +
+    #     theme_void()
+      
 # start time
   xx7_treels_start_time = Sys.time()
 #################################################################################
@@ -966,7 +1048,30 @@ if(
 # Detect tree stems 
 #################################################################################
 #################################################################################
-
+  ###_____________________________________________________###
+  ### chunk the normalized las if not already
+  ###_____________________________________________________###
+  if(grid_subset_switch==F){ # the las's are not chunked with buffer
+    # ###################################
+    # # tile the normalized files to process with TreeLS
+    # ###################################
+        norm_ctg_temp = lidR::readLAScatalog(normalize_flist)
+        # retile catalog
+        lidR::opt_progress(norm_ctg_temp) = F
+        lidR::opt_output_files(norm_ctg_temp) = paste0(config$las_stem_norm_dir,"/", "_{XLEFT}_{YBOTTOM}") # label outputs based on coordinates
+        lidR::opt_chunk_buffer(norm_ctg_temp) = 10
+        lidR::opt_chunk_size(norm_ctg_temp) = 100
+        lidR::catalog_retile(norm_ctg_temp) # apply retile
+        # create spatial index
+        # note this overwrites the normalize_flist created above if new files created
+        normalize_flist = create_lax_for_tiles(
+          las_file_list = list.files(config$las_stem_norm_dir, pattern = ".*\\.(laz|las)$", full.names = T)
+        )
+        # clean up
+        remove(list = ls()[grep("_temp",ls())])
+        gc()
+  }
+  
   ###_____________________________________________________###
   ### Define function to map for potential tree locations ###
   ### Using TreeLS::treeMap                               ###
@@ -1213,7 +1318,6 @@ if(
       #######################################
       ### a parallel version is:
       #######################################
-        flist_temp = list.files(config$las_normalize_dir, pattern = ".*\\.(laz|las)$", full.names = T)
         # configure parallel
         cores = parallel::detectCores()
         cluster = parallel::makeCluster(cores-1)
@@ -1222,11 +1326,11 @@ if(
         # pass to foreach to process each lidar file in parallel
           write_stem_las_ans = 
             foreach::foreach(
-              i = 1:length(flist_temp)
+              i = 1:length(normalize_flist)
               , .packages = c("tools","lidR","tidyverse","doParallel","TreeLS")
               , .inorder = F
             ) %dopar% {
-              write_stem_las_fn(las_path_name = flist_temp[i], min_tree_height = minimum_tree_height_m)
+              write_stem_las_fn(las_path_name = normalize_flist[i], min_tree_height = minimum_tree_height_m)
             } # end foreach
           # write_stem_las_ans
         # stop parallel
@@ -1237,15 +1341,14 @@ if(
     }else{
       # map over the normalized point cloud tiles
       write_stem_las_ans = 
-        list.files(config$las_normalize_dir, pattern = ".*\\.(laz|las)$", full.names = T) %>%
+        normalize_flist %>%
           purrr::map(write_stem_las_fn, min_tree_height = minimum_tree_height_m)
     }
   
-  # get file list
-  las_stem_flist = list.files(config$las_stem_dir, pattern = ".*\\.(laz|las)$", full.names = T)
-  
   # create spatial index files (.lax)
-  create_lax_for_tiles(las_stem_flist)
+  las_stem_flist = create_lax_for_tiles(
+    list.files(config$las_stem_dir, pattern = ".*\\.(laz|las)$", full.names = T)
+  )
   
   # clean up
     remove(list = ls()[grep("_temp",ls())])
@@ -1776,7 +1879,10 @@ gc()
       , data = treemap_trees_df
       , prior = p_temp
       , family = brms::brmsfamily("Gamma")
-      , iter = 4000
+      , iter = 4000, warmup = 2000, chains = 4
+      , cores = lasR::half_cores()
+      , file = paste0(config$delivery_dir, "/regional_dbh_height_model")
+      , file_refit = "always"
     )
     # plot(mod_nl_pop)
     # summary(mod_nl_pop)
@@ -1967,8 +2073,10 @@ gc()
                 dplyr::select(stem_dbh_cm, tree_height_m)
             , family = brms::brmsfamily("Gamma", link = "log")
             , prior = c(prior(gamma(0.01, 0.01), class = shape))
-            , iter = 4000
-            # , file = "../data/mod_lin"
+            , iter = 4000, warmup = 2000, chains = 4
+            , cores = lasR::half_cores()
+            , file = paste0(config$delivery_dir, "/local_dbh_height_model")
+            , file_refit = "always"
           )
         }
         
@@ -2301,17 +2409,9 @@ xx86_end_time = Sys.time()
       ) %>% 
       sf::st_drop_geometry() %>% 
       dplyr::mutate(
-        timer_tile_time_mins = difftime(xx2_denoise_start_time, xx1_tile_start_time, units = c("mins")) %>% 
+        timer_tile_time_mins = difftime(xx2_class_dtm_norm_chm_start_time, xx1_tile_start_time, units = c("mins")) %>% 
           as.numeric()
-        , timer_denoise_time_mins = difftime(xx3_classify_start_time, xx2_denoise_start_time, units = c("mins")) %>% 
-          as.numeric()
-        , timer_classify_time_mins = difftime(xx4_dtm_start_time, xx3_classify_start_time, units = c("mins")) %>% 
-          as.numeric()
-        , timer_dtm_time_mins = difftime(xx5_normalize_start_time, xx4_dtm_start_time, units = c("mins")) %>% 
-          as.numeric()
-        , timer_normalize_time_mins = difftime(xx6_chm_start_time, xx5_normalize_start_time, units = c("mins")) %>% 
-          as.numeric()
-        , timer_chm_time_mins = difftime(xx7_treels_start_time, xx6_chm_start_time, units = c("mins")) %>% 
+        , timer_class_dtm_norm_chm_time_mins = difftime(xx7_treels_start_time, xx2_class_dtm_norm_chm_start_time, units = c("mins")) %>% 
           as.numeric()
         , timer_treels_time_mins = difftime(xx8_itd_start_time, xx7_treels_start_time, units = c("mins")) %>% 
           as.numeric()
@@ -2334,8 +2434,9 @@ xx86_end_time = Sys.time()
         , sttng_dbh_max_size_m = dbh_max_size_m
         , sttng_local_dbh_model = ifelse(local_dbh_model == "rf", local_dbh_model, "lin")
         , sttng_user_supplied_epsg = as.character(user_supplied_epsg)
-        , sttng_las_grid_res_m = las_grid_res_m
-        , sttng_las_grid_buff_m = las_grid_buff_m
+        , sttng_accuracy_level = accuracy_level
+        , sttng_pts_m2_for_triangulation = max_pts_m2
+        , sttng_normalization_with = ifelse(as.numeric(accuracy_level) %in% c(2,3),"triangulation","dtm")
         , sttng_competition_buffer_m = competition_buffer_m
       )
 

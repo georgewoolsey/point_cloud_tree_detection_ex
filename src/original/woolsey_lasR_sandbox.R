@@ -7,7 +7,8 @@
 ################################################################################
 
 ########## !!!!!!!!!!!!!!!!! run point_cloud_processing.r to line 328...thru: 
- ## las_ctg = lidR::readLAScatalog(config$input_las_dir)
+
+library(future)
 
 # remove all files in delivery and temp
 list.files(config$temp_dir, recursive = T, full.names = T) %>%
@@ -21,17 +22,18 @@ xxst_time = Sys.time()
 # chunk for large area/pt pt clouds
 # adpative retiling w/ minimal (no?) user input
 ######################################
+  # for super big ctgs...lots of different stuff needs to happen to reduce memory issues
+  max_ctg_pts = 70e6 # max points to process in any ctg using lasR at one time
+  ctg_pts_so_many = sum(las_ctg@data$Number.of.point.records) > max_ctg_pts
   # choose processing
   # accuracy_level = 1 # uses DTM to height normalize the points
-  # accuracy_level = 2 # uses triangulation with low point density to height normalize the points
-  accuracy_level = 3 # uses triangulation with high point density to height normalize the points
+  # accuracy_level = 2 # uses triangulation with low point density (20 pts/m2) to height normalize the points
+  # accuracy_level = 3 # uses triangulation with high point density (100 pts/m2) to height normalize the points
+  accuracy_level = 2
   # set maximums based on sample data testing
   #### These maximums chunk the data
+    # this one is less important as never experienced issues with large areas
     max_area_m2 = 90e3 # original = 90e3
-    max_pts = dplyr::case_when(
-      sum(las_ctg@data$Number.of.point.records) > 70e6 ~ 30e6 
-      , T ~ 70e6
-    ) # original = 70e6
   #### This maximum filters the ground points to perform Delaunay triangulation
     # see: https://github.com/r-lidar/lasR/issues/18#issuecomment-2027818414
     max_pts_m2 = dplyr::case_when(
@@ -39,12 +41,14 @@ xxst_time = Sys.time()
       , as.numeric(accuracy_level) == 3 ~ 100
       , T ~ 20
     )
-    # original = 100 ## at 100 pts/m2, the resulting CHM pixel values (0.25m resolution)
-      # ... are within -0.009% and 0.026% of the values obtained by using 400 pts/m2 with 99% probability
+    ## at 100 pts/m2, the resulting CHM pixel values (0.25m resolution) are within -0.009% and 0.026%
+      # ... of the values obtained by using 400 pts/m2 with 99% probability
   ########################
-  # check for overlaps in whole catalog
+  # check for tile overlaps and so many points in whole catalog
+  # ...determines tiling and processing of grid subsets
   ########################
-    overlap_data = las_ctg@data %>%
+    ctg_chunk_data =
+      las_ctg@data %>%
       dplyr::mutate(
         area_m2 = sf::st_area(geometry) %>% as.numeric()
         , pts = Number.of.point.records
@@ -67,10 +71,21 @@ xxst_time = Sys.time()
           sf::st_drop_geometry()
       ) %>% 
       dplyr::mutate(
-        pct_overlap = (area_m2-total_area_m2)/total_area_m2
+        # so many points chunk size
+        # uneven distribution of points in ctg => some chunks bigger than max_ctg_pts
+        ctg_pt_factor = pts/(max_ctg_pts*0.2) #...so make much smaller
+        , chunk_max_ctg_pts = dplyr::case_when(
+            # no resize
+            ctg_pt_factor <= 1 ~ 0
+            # yes resize
+            , ctg_pt_factor > 1 ~ round(sqrt(area_m2/ctg_pt_factor), digits = -1) # round to nearest 10
+          )
+        , buffer_chunk_max_ctg_pts = ifelse(round(chunk_max_ctg_pts*0.05,digits=-1)<10,10,round(chunk_max_ctg_pts*0.05,digits=-1))
+        # overlap chunk size
+        , pct_overlap = (area_m2-total_area_m2)/total_area_m2
         , area_factor = total_area_m2/max_area_m2
-        , pt_factor = pts/max_pts
-        , chunk = dplyr::case_when(
+        , pt_factor = pts/max_ctg_pts
+        , chunk_overlap = dplyr::case_when(
             # no resize
             area_factor <= 1 & pt_factor <= 1 ~ 0
             # yes resize
@@ -81,130 +96,177 @@ xxst_time = Sys.time()
             , area_factor > 1 ~ round(sqrt(area_m2/area_factor), digits = -1) # round to nearest 10
             , pt_factor > 1 ~ round(sqrt(area_m2/pt_factor), digits = -1) # round to nearest 10
           )
-        , buffer = ifelse(round(chunk*0.1,digits=-1)<10,10,round(chunk*0.1,digits=-1))
+        , buffer_overlap = ifelse(round(chunk_overlap*0.05,digits=-1)<10,10,round(chunk_overlap*0.05,digits=-1))
       )
-  # retile whole catalog if high overlap
+    # ctg_chunk_data
+  ############################################################
+  ############################################################
+  # use ctg_chunk_data to determine chunking
+  ############################################################
+  ############################################################
+    plot(las_ctg)
+    ########################
+    # split into grid subsets
+    # this is done for ctg's with sooo many points
+    # because lasR pipeline crashes memory and only way around it is 
+    # to break out steps into separarte chunks (requires reading data multiple times..sooo inefficient)
+    # and then to use lidR for classify and normalize steps which means lasR is marginalized
+    # ....
+    # objective here is to break the ctg into lasR manageable subsets: each subset goes through lasR pipeline individually
+    # then bring the DTM and CHM results together via terra::sprc and mosaic:
+      # # read
+      # rast_list = list.files("../data/", pattern = ".*\\.(tif|tiff)$", full.names = T) %>% purrr::map(function(x){terra::rast(x)})
+      # # mosaic
+      # rast_mosaic = terra::sprc(rast_list) %>% terra::mosaic(fun = "max")
+    ########################
     if(
-      overlap_data$pct_overlap[1] > 0.1
-      & overlap_data$chunk[1] > 0
+      ctg_chunk_data$chunk_max_ctg_pts[1] > 0
+      & ctg_pts_so_many == T
     ){
       # if need to retile
       # retile catalog
       lidR::opt_progress(las_ctg) = F
       lidR::opt_output_files(las_ctg) = paste0(config$las_grid_dir,"/", "_{XLEFT}_{YBOTTOM}") # label outputs based on coordinates
-      # buffering is handled by lasR::exec so no need to buffer here
-      lidR::opt_chunk_buffer(las_ctg) = 0 # overlap_data$buffer[1]
-      lidR::opt_chunk_size(las_ctg) = overlap_data$chunk[1] # retile
+      lidR::opt_filter(las_ctg) = "-drop_duplicates"
+      # different buffer depending on accuracy level
+      lidR::opt_chunk_buffer(las_ctg) = ifelse(
+        # buffering here because these grid subsets will be processed independently
+        as.numeric(accuracy_level) %in% c(2,3)
+        , 10
+        # not buffering here because these grid subsets will be processed altogether with buffer set for lasR::exec
+        , 0
+      )
+      lidR::opt_chunk_size(las_ctg) = ctg_chunk_data$chunk_max_ctg_pts[1] # retile
+      # # opt_chunk_alignment(las_ctg) = c(1000*runif(1), 1000*runif(1)) # this doesn't matter so much
+      # # https://cran.r-project.org/web/packages/lidR/vignettes/lidR-LAScatalog-engine.html#control-of-the-chunk-alignment
       # reset las_ctg
-      las_ctg = lidR::catalog_retile(las_ctg) # apply retile
+      lidR::catalog_retile(las_ctg) # apply retile
       lidR::opt_progress(las_ctg) = T
       # create spatial index
-      create_lax_for_tiles(
+      flist_temp = create_lax_for_tiles(
         las_file_list = list.files(config$las_grid_dir, pattern = ".*\\.(laz|las)$", full.names = T)
       )
-    }
+      # switch for processing grid subsets
+      grid_subset_switch_temp = ifelse(
+        # buffering here because these grid subsets will be processed independently
+        as.numeric(accuracy_level) %in% c(2,3)
+        , T
+        # not buffering here because these grid subsets will be processed altogether with buffer set for lasR::exec
+        , F
+      )
+    }else if( # retile whole catalog if high overlap
+      ctg_chunk_data$chunk_overlap[1] > 0
+      & ctg_chunk_data$pct_overlap[1] > 0.1
+    ){
+      # if need to retile
+      # retile catalog
+      lidR::opt_progress(las_ctg) = F
+      lidR::opt_output_files(las_ctg) = paste0(config$las_grid_dir,"/", "_{XLEFT}_{YBOTTOM}") # label outputs based on coordinates
+      lidR::opt_filter(las_ctg) = "-drop_duplicates"
+      # buffering is handled by lasR::exec so no need to buffer here
+      lidR::opt_chunk_buffer(las_ctg) = 0 # ctg_chunk_data$buffer[1]
+      lidR::opt_chunk_size(las_ctg) = ctg_chunk_data$chunk[1] # retile
+      # reset las_ctg
+      lidR::catalog_retile(las_ctg) # apply retile
+      lidR::opt_progress(las_ctg) = T
+      # create spatial index
+      flist_temp = create_lax_for_tiles(
+        las_file_list = list.files(config$las_grid_dir, pattern = ".*\\.(laz|las)$", full.names = T)
+      )
+      # switch for processing grid subsets
+      grid_subset_switch_temp = F
+    }else{grid_subset_switch_temp = F}
+      # flist_temp
+      # grid_subset_switch_temp
+      plot(lidR::readLAScatalog(flist_temp))
+      # lidR::readLAScatalog(flist_temp)@data %>% dplyr::glimpse()
+      # lidR::readLAScatalog(flist_temp)@data %>% 
+      #   dplyr::select(filename, Number.of.point.records) %>% 
+      #   sf::st_drop_geometry()
+  
   ########################
-  # check if individual files need to be retiled
+  # get pct filter for creating dtm and normalized point clouds using triangulation
   ########################
-  # determine chunks for las_ctg
-    chunk_data = las_ctg@data %>%
+    process_data =
+      lidR::readLAScatalog(flist_temp)@data %>%
+      dplyr::ungroup() %>% 
       dplyr::mutate(
-        area_m2 = sf::st_area(geometry) %>% as.numeric()
+        processing_grid = dplyr::case_when(
+          grid_subset_switch_temp == T ~ dplyr::row_number()
+          , T ~ 1
+        )
+        , area_m2 = sf::st_area(geometry) %>% as.numeric()
         , pts = Number.of.point.records
+        , pts_m2 = pts/area_m2
       ) %>% 
       sf::st_drop_geometry() %>% 
-      dplyr::select(filename, area_m2, pts) %>% 
-      dplyr::mutate(pts_m2 = pts/area_m2) %>% 
-      # calculate factor to reduce by if needed
+      dplyr::select(processing_grid, filename, area_m2, pts, pts_m2) %>% 
+      # get rid of tiny edge files with very few points which cannot be utilized for delauny triangulation
+        # !!!!!!!!!!!!!!! upgrade to remove tiles completely spatially covered by other tiles
+      dplyr::filter(pts>max_ctg_pts*0.0001) %>% 
+      # sometimes there are super small chunks created which can lead to 0 points after filtering for performing calcs
       dplyr::mutate(
-        area_factor = area_m2/max_area_m2
-        , pt_factor = pts/max_pts
-        , chunk = dplyr::case_when(
-            # no resize
-            area_factor <= 1 & pt_factor <= 1 ~ 0
-            # yes resize
-            , area_factor > 1 & pt_factor > 1 ~ min(
-              round(sqrt(area_m2/area_factor), digits = -1) # round to nearest 10
-              , round(sqrt(area_m2/pt_factor), digits = -1) # round to nearest 10
-            )
-            , area_factor > 1 ~ round(sqrt(area_m2/area_factor), digits = -1) # round to nearest 10
-            , pt_factor > 1 ~ round(sqrt(area_m2/pt_factor), digits = -1) # round to nearest 10
-          )
-        , buffer = ifelse(round(chunk*0.1,digits=-1)<10,10,round(chunk*0.1,digits=-1))
-        , pts_m2_factor = dplyr::case_when(
+        processing_grid = dplyr::case_when(
+          pts < max_ctg_pts*0.0002 & !is.na(dplyr::lag(pts)) & !is.na(dplyr::lead(pts)) & 
+            dplyr::lag(pts) < dplyr::lead(pts) ~ dplyr::lag(processing_grid)
+          , pts < max_ctg_pts*0.0002 & !is.na(dplyr::lag(pts)) & !is.na(dplyr::lead(pts)) & 
+            dplyr::lag(pts) > dplyr::lead(pts) ~ dplyr::lead(processing_grid)
+          , pts < max_ctg_pts*0.0002 & !is.na(dplyr::lag(pts)) ~ dplyr::lag(processing_grid)
+          , pts < max_ctg_pts*0.0002 & !is.na(dplyr::lead(pts)) ~ dplyr::lead(processing_grid)
+          , T ~ processing_grid
+        )
+      ) %>% 
+      dplyr::group_by(processing_grid) %>% 
+      dplyr::mutate(
+        pts_m2 = pts/area_m2
+      # calculate factor to reduce by for triangulation
+        , pts_m2_factor_optimal = dplyr::case_when(
             max_pts_m2/pts_m2 >= 1 ~ 1
-            , TRUE ~ round(max_pts_m2/pts_m2, digits = 2)
+            , TRUE ~ max_pts_m2/pts_m2
         )
-      )
-  # retile individual file function based on chunk data
-    retile_fn = function(row_n){
-      if(chunk_data$chunk[row_n]>0){
-        # read as las ctg
-          ctg = lidR::readLAScatalog(chunk_data$filename[row_n])
-        # retile catalog
-          lidR::opt_progress(ctg) = F
-          lidR::opt_output_files(ctg) = paste0(config$las_grid_dir,"/", "_{XLEFT}_{YBOTTOM}") # label outputs based on coordinates
-          # buffering is handled by lasR::exec so no need to buffer here
-          lidR::opt_chunk_buffer(ctg) = 0 # chunk_data$buffer[row_n]
-          lidR::opt_chunk_size(ctg) = chunk_data$chunk[row_n] # retile
-          retile_ctg = lidR::catalog_retile(ctg) # apply retile
-          lidR::opt_progress(ctg) = T
-        # get file list
-          las_list = retile_ctg@data$filename
-        # create spatial index
-          create_lax_for_tiles(
-            las_file_list = las_list
-          )
-      }else{
-        las_list = chunk_data$filename[row_n]
-      }
-      return(las_list)
-    }  
-  # call the retile function
-    # !!!! this if/else flow creates "process_flist" which is the list of files that will be processed
-    process_flist = 1:nrow(chunk_data) %>% 
-      purrr::map(retile_fn) %>% 
-      c() %>%
-      unlist() 
-    # process_flist
-    # plot(lidR::readLAScatalog(chunk_data$filename)) # orig
-    # plot(lidR::readLAScatalog(process_flist)) # new
+        # area based weighted mean
+          # pass this to filter_for_dtm
+        , pts_m2_factor_ctg = max(stats::weighted.mean(
+            x = pts_m2_factor_optimal
+            , w = area_m2/sum(area_m2)
+          ) %>% 
+          round(digits = 2),0.01)
+        , filtered_pts_m2 = pts_m2*pts_m2_factor_ctg
+        , processing_grid_tot_pts = sum(pts)
+      ) %>% 
+      dplyr::ungroup()
     
-  # get pct filter for creating dtm and normalized point clouds using triangulation
-    chunk_data =
-      lidR::readLAScatalog(process_flist)@data %>% 
-        dplyr::mutate(
-          area_m2 = sf::st_area(geometry) %>% as.numeric()
-          , pts = Number.of.point.records
-        ) %>% 
-        sf::st_drop_geometry() %>% 
-        dplyr::select(filename, area_m2, pts) %>% 
-        dplyr::ungroup() %>% 
-        dplyr::mutate(
-          pts_m2 = pts/area_m2
-        # calculate factor to reduce by if needed
-          , pts_m2_factor_optimal = dplyr::case_when(
-              max_pts_m2/pts_m2 >= 1 ~ 1
-              , TRUE ~ round(max_pts_m2/pts_m2, digits = 2)
-          )
-          # area based weighted mean
-            # pass this to filter_for_dtm
-          , pts_m2_factor_ctg = stats::weighted.mean(
-              x = pts_m2_factor_optimal
-              , w = area_m2/sum(area_m2)
-            ) %>% 
-            round(digits = 2)
-          , filtered_pts_m2 = pts_m2*pts_m2_factor_ctg
-        )
+    # plot
+    lidR::readLAScatalog(process_data$filename)@data %>%
+      dplyr::inner_join(process_data, by = dplyr::join_by("filename")) %>%
+      dplyr::group_by(processing_grid) %>%
+      dplyr::mutate(
+        pts = Number.of.point.records, tot_pts = sum(pts)
+        , lab = pts == max(pts)
+      ) %>%
+      ggplot() +
+        # geom_sf(aes(fill = tot_pts), alpha = 0.6) +
+        geom_sf(aes(fill = as.factor(processing_grid)), alpha = 0.6) +
+        geom_sf_text(aes(label = ifelse(lab,as.factor(processing_grid), ""))) +
+        # scale_fill_viridis_c(labels = scales::comma_format())
+        scale_fill_viridis_d(option = "turbo") +
+        labs(x="",y="",title="processing_grid") +
+        theme_light() +
+        theme(legend.position = "none")
+    # count
+    process_data %>%
+      dplyr::distinct(processing_grid, processing_grid_tot_pts)
+    
     # save processing attributes
     write.csv(
-      chunk_data
+      process_data
       , paste0(config$delivery_dir, "/processing_las_tiling.csv")
       , row.names = F
     )
   # clean up
     remove(list = ls()[grep("_temp",ls())])
     gc()
+    
 
 ######################################
 # DEFINE ALL lasR pipeline steps
@@ -215,7 +277,7 @@ xxst_time = Sys.time()
   ###################
   # read with filter
   ###################
-    lasr_read = lasR::reader_las(filter = "-drop_duplicates")
+    lasr_read = lasR::reader_las(filter = "-drop_noise -drop_duplicates")
     # lasr_read = lasR::reader_las()
   ###################
   # classify
@@ -268,8 +330,22 @@ xxst_time = Sys.time()
         return(data)
       }
       
-      classify = callback(mcc, expose = "xyz", s = s, t = t)
+      classify = lasR::callback(mcc, expose = "xyz", s = s, t = t)
       return(classify)
+    }
+  ################
+  # choose classification algorithm
+  ################
+    classification_alg = "csf"
+    if(tolower(classification_alg)=="mcc"){
+      lasr_classify = lasr_classify_mcc(s = 1.5, t = 0.3)
+    }else{
+      lasr_classify = lasr_classify_csf(
+        # csf options
+        smooth = FALSE, threshold = 0.5
+        , resolution = 0.5, rigidness = 1L
+        , iterations = 500L, step = 0.65
+      )
     }
   
   ###################
@@ -279,64 +355,87 @@ xxst_time = Sys.time()
     lasr_denoise = lasR::classify_isolated_points(res =  5, n = 6)
     # lasr_denoise_filter = lasR::delete_points(filter = lasR::drop_noise())
     
+    # classify write step after denoise
+    lasr_write_classify = lasR::write_las(
+        ofile = paste0(config$las_classify_dir, "/*_classify.las")
+        # ofile = paste0(config$las_classify_dir, "/*_classify.las")
+        , filter = "-drop_noise"
+        , keep_buffer = F
+      )
   ###################
   # dtm
   ###################
-    # file name for write
+    lasr_dtm_norm_fn = function(
       dtm_file_name = paste0(config$delivery_dir, "/dtm_", desired_dtm_res, "m.tif")
-    # perform Delaunay triangulation
-      # tri = lasR::triangulate(filter = "-keep_class 2 -keep_class 9 -keep_random_fraction 0.01")
-      ####
-      # set filter based on # points
-      ####
-      filter_for_dtm = paste0(
-        "-keep_class 2 -keep_class 9 -keep_random_fraction "
-        , chunk_data$pts_m2_factor_ctg[1] %>% scales::comma(accuracy = 0.01)
-      )
-      ####
-      # triangulate with filter
-      ####
-      lasr_triangulate = lasR::triangulate(
-        # class 2 = ground; class 9 = water
-        filter = filter_for_dtm
-        , max_edge = 0
-        # , max_edge = c(0,1)
-        # # write to disk to preserve memory
-        # , ofile = paste0(config$las_denoise_dir, "/", "*_tri.gpkg")
-      )
-    # rasterize the result of the Delaunay triangulation
-      lasr_dtm = lasR::rasterize(
-        res = desired_dtm_res
-        , operators = lasr_triangulate
-        , filter = lasR::drop_noise()
-        # # write to disk to preserve memory
-        , ofile = dtm_file_name
-      )
+      , frac_for_tri = 1
+      , dtm_res = desired_dtm_res
+      , norm_accuracy = accuracy_level
+    ){
+      # perform Delaunay triangulation
+        # tri = lasR::triangulate(filter = "-keep_class 2 -keep_class 9 -keep_random_fraction 0.01")
+        ####
+        # set filter based on # points
+        ####
+        filter_for_dtm = paste0(
+          "-drop_noise -keep_class 2 -keep_class 9 -keep_random_fraction "
+          , ifelse(frac_for_tri>=1, "1", scales::comma(frac_for_tri, accuracy = 0.01))
+        )
+        ####
+        # triangulate with filter
+        ####
+        lasr_triangulate = lasR::triangulate(
+          # class 2 = ground; class 9 = water
+          filter = filter_for_dtm
+          , max_edge = 0
+          # , max_edge = c(0,1)
+          # # write to disk to preserve memory
+          , ofile = ""
+          # , ofile = paste0(config$las_denoise_dir, "/", "*_tri.gpkg")
+        )
+      # rasterize the result of the Delaunay triangulation
+        lasr_dtm = lasR::rasterize(
+          res = dtm_res
+          , operators = lasr_triangulate
+          , filter = lasR::drop_noise()
+          # # write to disk to preserve memory
+          , ofile = dtm_file_name
+        ) 
+      # normalize
+      # stage = triangulate: takes foreevvveerrrrrrr
+        # ... but see: https://github.com/r-lidar/lasR/issues/18#issuecomment-2027818414
+        ## at this density of point, my advice is anyway to decimate your ground points. 
+        ## With 1/100 of the ground points you already have 5 ground pts/m2 to compute a 
+        ## DTM with a 1 m resolution! You could even decimate to 1/250. 
+        ## This will solve your computation time issue in the same time.
+        ## stage = dtm
+          # ... see: https://github.com/r-lidar/lasR/issues/17#issuecomment-2027698100
+          # also from the lidR book https://r-lidar.github.io/lidRbook/norm.html:
+            ## "Point cloud normalization without a DTM interpolates the elevation of 
+            ## every single point locations using ground points. It no longer uses elevations 
+            ## at discrete predefined locations. Thus the methods is exact, computationally speaking. 
+            ## It means that it is equivalent to using a continuous DTM but it is important 
+            ## to recall that all interpolation methods are interpolation and by definition 
+            ## make guesses with different strategies. Thus by “exact” we mean “continuous”.
+        if(as.numeric(norm_accuracy) %in% c(2,3)){
+          lasr_normalize = lasR::transform_with(
+            stage = lasr_triangulate
+            , operator = "-"
+          )
+        }else{
+          lasr_normalize = lasR::transform_with(
+            stage = lasr_dtm
+            , operator = "-"
+          )
+        }
+      # pipeline
+      pipeline = lasr_triangulate + lasr_dtm + lasr_normalize
+      return(pipeline)
+    }
 
   ###################
   # normalize
   ###################
-    # normalize
-    # stage = triangulate: takes foreevvveerrrrrrr
-      # ... but see: https://github.com/r-lidar/lasR/issues/18#issuecomment-2027818414
-      ## at this density of point, my advice is anyway to decimate your ground points. 
-      ## With 1/100 of the ground points you already have 5 ground pts/m2 to compute a 
-      ## DTM with a 1 m resolution! You could even decimate to 1/250. 
-      ## This will solve your computation time issue in the same time.
-      ## stage = dtm
-        # ... see: https://github.com/r-lidar/lasR/issues/17#issuecomment-2027698100
-        # also from the lidR book https://r-lidar.github.io/lidRbook/norm.html:
-          ## "Point cloud normalization without a DTM interpolates the elevation of 
-          ## every single point locations using ground points. It no longer uses elevations 
-          ## at discrete predefined locations. Thus the methods is exact, computationally speaking. 
-          ## It means that it is equivalent to using a continuous DTM but it is important 
-          ## to recall that all interpolation methods are interpolation and by definition 
-          ## make guesses with different strategies. Thus by “exact” we mean “continuous”.
-      lasr_normalize = lasR::transform_with(
-        stage = lasr_triangulate
-        # stage = lasr_dtm
-        , operator = "-"
-      )
+      
       ##### ^^^^^ this (with stage = tri) was taking forever with high density point clouds
       ##### .... trying with callback instead
     # define normalize function using callback
@@ -366,6 +465,7 @@ xxst_time = Sys.time()
         )
         return(normalize)
       }
+    
     # write
       lasr_write_normalize = lasR::write_las(
         filter = "-drop_z_below 0 -drop_class 2 9 18"
@@ -376,113 +476,341 @@ xxst_time = Sys.time()
   ###################
   # chm
   ###################
-    # file name for write
-      chm_file_name = paste0(config$delivery_dir, "/chm_", desired_chm_res, "m.tif")
-  
-    # chm
-      #set up chm pipeline step
-      # operators = "max" is analogous to `lidR::rasterize_canopy(algorithm = p2r())`
-      # for each pixel of the output raster the function attributes the height of the highest point found
-      lasr_chm = lasR::rasterize(
-        res = desired_chm_res
-        , operators = "max"
-        , filter = paste0(
-          "-drop_class 2 9 18 -drop_z_below "
-          , minimum_tree_height_m
-          , " -drop_z_above "
-          , max_height_threshold_m
+    lasr_chm_fn = function(
+     chm_file_name = paste0(config$delivery_dir, "/chm_", desired_chm_res, "m.tif") 
+     , chm_res = desired_chm_res
+     , min_height_m = minimum_tree_height_m
+     , max_height_m = max_height_threshold_m
+    ){
+      # chm
+        #set up chm pipeline step
+        # operators = "max" is analogous to `lidR::rasterize_canopy(algorithm = p2r())`
+        # for each pixel of the output raster the function attributes the height of the highest point found
+        lasr_chm = lasR::rasterize(
+          res = chm_res
+          , operators = "max"
+          , filter = paste0(
+            "-drop_class 2 9 18 -drop_z_below "
+            , min_height_m
+            , " -drop_z_above "
+            , max_height_m
+          )
+          , ofile = ""
+          # , ofile = paste0(config$chm_dir, "/*_chm.tif")
         )
-        , ofile = ""
-      )
-    # Pits and spikes filling for raster with algorithm from St-Onge 2008 (see reference).
-      lasr_chm_pitfill = lasR::pit_fill(raster = lasr_chm, ofile = chm_file_name)
+      # Pits and spikes filling for raster with algorithm from St-Onge 2008 (see reference).
+        lasr_chm_pitfill = lasR::pit_fill(raster = lasr_chm, ofile = chm_file_name)
+      # pipeline
+        pipeline = lasr_chm + lasr_chm_pitfill
+        return(pipeline)
+    }
 
 ######################################
-# lasR full pipeline
+# set processing file options using lidR
 ######################################
-  ################
-  # choose classification algorithm
-  ################
-    classification_alg = "csf"
-    if(tolower(classification_alg)=="mcc"){
-      lasr_classify = lasr_classify_mcc(s = 1.5, t = 0.3)
+  # # with multiple high density clouds...memory is/was issue
+  #   # force lasR::exec to operate with specified buffer using lidR LASCatalog settings
+  #     # these settings take precedence within lasR
+  #   tile_las_ctg = lidR::readLAScatalog(process_flist)
+  #   lidR::opt_chunk_buffer(tile_las_ctg) = 10
+  #   lidR::opt_chunk_size(tile_las_ctg) = 0
+# ######################################
+# # when we're having memory issues
+# # ...let's talk about lasR::callback
+# ######################################
+#   # from lasR: https://r-lidar.github.io/lasR/articles/tutorial.html
+#   #     "callback() exposes the point cloud as a data.frame.
+#   #       This is the only way to expose the point clouds to users in a manageable way.
+#   #       One of the reasons why lasR is more memory-efficient and faster than lidR
+#   #       is that it does not expose the point cloud as a data.frame.
+#   #       Thus, the pipelines using callback() are not significantly different from lidR.
+#   #       The advantage of using lasR here is the ability to pipe different stages."
+#   ###################
+#   # classify points first with lidR? then pass classified las's to lasR
+#   # ...worth a shot ;\
+#   ###################
+#     # define function to classify files using lidR LAScatalog
+#     lidr_classify_fn = function(
+#       ctg, out_dir, buff = 10, chnk = 0
+#       # show progress?
+#       , prog = F
+#       # parallel?
+#       , parallel = use_parallel_processing
+#     ){
+#       if(parallel){
+#         # set parallel
+#         future::plan(strategy = multisession, workers = lasR::half_cores())
+#       }
+#       # loads only the points of interest when querying a chunk
+#       lidR::opt_filter(ctg) = "-drop_noise -drop_duplicates"
+#       # set buffer and chunk (chunking already done above)
+#       lidR::opt_chunk_buffer(ctg) = buff
+#       lidR::opt_chunk_size(ctg) = chnk
+#       # redirect results to output
+#       lidR::opt_output_files(ctg) = paste0(out_dir, "/{*}_classify")
+#       # turn off early exit
+#       lidR::opt_stop_early(ctg) = FALSE
+#       # turn off progress
+#       lidR::opt_progress(ctg) = prog
+#       # classify
+#       lidr_classify_ans = lidR::classify_ground(
+#         ctg
+#         , algorithm = csf() # this uses the default options...tried to pass custom but failed?
+#       )
+#       # off parallel
+#       if(parallel){
+#         # off parallel
+#         future::plan(strategy = sequential)
+#       }
+#       # return
+#       return(lidr_classify_ans)
+#     }
+# 
+#     # call the function
+#     message("point classification with lidR (parallel = ",use_parallel_processing, ") starting at ", Sys.time())
+#     lidr_classify_ans_temp = lidr_classify_fn(ctg = tile_las_ctg, out_dir = config$las_classify_dir, prog = T)
+# 
+#     # ggplot() +
+#     #   geom_sf(data = lidr_classify_ans_temp@data, fill = "red", alpha = 0.5, color = NA) +
+#     #   geom_sf(data = tile_las_ctg@data, fill = NA, lwd = 1)
+# 
+#     # create spatial index
+#     flist_temp = create_lax_for_tiles(
+#       list.files(config$las_classify_dir, pattern = ".*\\.(laz|las)$", full.names = T)
+#     )
+#     # with multiple high density clouds...memory is/was issue
+#     # force lasR::exec to operate with specified buffer using lidR LASCatalog settings
+#       # these settings take precedence within lasR
+#     tile_las_ctg = lidR::readLAScatalog(flist_temp)
+#     lidR::opt_chunk_buffer(tile_las_ctg) = 10
+#     lidR::opt_chunk_size(tile_las_ctg) = 0
+# 
+#     # clean up
+#     remove(list = ls()[grep("_temp",ls())])
+#     gc()
+# ######################################
+# # when we keep having having memory issues
+# # ...let's split up the pipeline even though this requires reading data multiple times
+# ######################################
+#   # set lasR parallel processing options as of lasR 0.4.2
+#     lasR::set_parallel_strategy(
+#       strategy = lasR::concurrent_points(
+#           ncores = max(lasR::ncores()-1, lasR::half_cores())
+#         )
+#     )
+#   ######################################
+#   # lasR dtm pipeline
+#   ######################################
+#     lasr_pipeline_dtm = lasR::reader_las(filter = filter_for_dtm) + 
+#       lasr_triangulate + lasr_dtm
+#     
+#     # message
+#     message(
+#       "starting lasR DTM processing at"
+#       , "..."
+#       , Sys.time()
+#     )
+#   
+#     # lasR execute
+#       lasr_dtm_ans = lasR::exec(
+#         lasr_pipeline_dtm
+#         # , on = process_flist # defined above in retile step
+#         , on = tile_las_ctg
+#         # set lasR exec processing options as of lasR 0.4.2
+#         , with = list(
+#           progress = T
+#         )
+#       )
+#   
+#   ######################################
+#   # clean dtm
+#   ######################################
+#     # fill dtm cells that are missing still with the mean of a window
+#     dtm_rast = terra::rast(dtm_file_name)
+#     dtm_rast = dtm_rast %>%
+#       terra::crop(
+#         las_ctg@data$geometry %>% 
+#           sf::st_union() %>% 
+#           terra::vect() %>% 
+#           terra::project(terra::crs(dtm_rast))
+#       ) %>% 
+#       terra::mask(
+#         las_ctg@data$geometry %>% 
+#           sf::st_union() %>% 
+#           terra::vect() %>% 
+#           terra::project(terra::crs(dtm_rast))
+#       ) %>% 
+#       terra::focal(
+#         w = 3
+#         , fun = "mean"
+#         , na.rm = T
+#         # na.policy Must be one of:
+#           # "all" (compute for all cells)
+#           # , "only" (only for cells that are NA)
+#           # , or "omit" (skip cells that are NA).
+#         , na.policy = "only"
+#       )
+#     # dtm_rast %>% terra::crs()
+#     # dtm_rast %>% terra::plot()
+#     
+#     # write to delivery directory
+#       terra::writeRaster(
+#         dtm_rast
+#         , filename = dtm_file_name
+#         , overwrite = T
+#       )
+#   ######################################
+#   # lasR chm pipeline
+#   ######################################
+#     if(as.numeric(accuracy_level) %in% c(2,3)){
+#         # normalize
+#         lasr_normalize = lasR::transform_with(stage = lasr_triangulate, operator = "-")
+#         # pipeline
+#         lasr_pipeline_chm = lasr_read + 
+#           lasr_triangulate +  lasr_normalize +
+#           lasr_write_normalize +
+#           lasr_chm + lasr_chm_pitfill
+#       }else{
+#         # load dtm
+#         lasr_ld_dtm = lasR::load_raster(dtm_file_name)
+#         # normalize
+#         lasr_normalize = lasR::transform_with(stage = lasr_ld_dtm, operator = "-")
+#         # pipeline
+#         lasr_pipeline_chm = lasr_read + 
+#           lasr_ld_dtm + lasr_normalize +
+#           lasr_write_normalize +
+#           lasr_chm + lasr_chm_pitfill
+#       }
+#     
+#     # message
+#     message(
+#       "starting lasR CHM processing at"
+#       , "..."
+#       , Sys.time()
+#     )
+#   
+#     # lasR execute
+#       lasr_chm_ans = lasR::exec(
+#         lasr_pipeline_chm
+#         # , on = process_flist # defined above in retile step
+#         , on = tile_las_ctg
+#         # set lasR exec processing options as of lasR 0.4.2
+#         , with = list(
+#           progress = T
+#         )
+#       )
+    
+  ######################################
+  # lasR full pipeline
+  ######################################
+  # map over process_data$processing_grid
+  lasr_pipeline_fn = function(
+      processing_grid_num = 1
+      , keep_intrmdt = keep_intermediate_files
+      # lasr_dtm_norm_fn
+      , dtm_res_m = desired_dtm_res
+      , normalization_accuracy = accuracy_level
+      # lasr_chm_fn
+       , chm_res_m = desired_chm_res
+       , min_height = minimum_tree_height_m
+       , max_height = max_height_threshold_m
+    ){
+    # output files
+    dtm_file_name = paste0(config$dtm_dir, "/", processing_grid_num,"_dtm_", dtm_res_m, "m.tif")
+    chm_file_name = paste0(config$chm_dir, "/", processing_grid_num,"_chm_", chm_res_m, "m.tif")
+    # files to process
+    flist = process_data %>% 
+      dplyr::filter(processing_grid == processing_grid_num) %>% 
+      dplyr::pull(filename)
+    # set up catalog
+      tile_las_ctg = lidR::readLAScatalog(flist)
+      lidR::opt_chunk_buffer(tile_las_ctg) = 10
+      lidR::opt_chunk_size(tile_las_ctg) = 0
+    # fraction for triangulation
+    frac_for_tri = process_data %>% 
+      dplyr::filter(processing_grid == processing_grid_num) %>% 
+      dplyr::pull(pts_m2_factor_ctg) %>% 
+      .[1]
+    ################
+    # buld pipeline
+    ################
+    if(keep_intrmdt == T){
+      # pipeline
+        lasr_pipeline_temp = lasr_read +
+          lasr_classify +
+          lasr_denoise +
+          lasr_write_classify +
+          lasr_dtm_norm_fn(
+            dtm_file_name = dtm_file_name
+            , frac_for_tri = frac_for_tri
+            , dtm_res = dtm_res_m
+            , norm_accuracy = normalization_accuracy
+          ) + 
+          lasr_write_normalize +
+          lasr_chm_fn(
+            chm_file_name = chm_file_name
+             , chm_res = chm_res_m
+             , min_height_m = min_height
+             , max_height_m = max_height
+          )
     }else{
-      lasr_classify = lasr_classify_csf(
-        # csf options
-        smooth = FALSE, threshold = 0.5
-        , resolution = 0.5, rigidness = 1L
-        , iterations = 500L, step = 0.65
-      )
+      # pipeline
+        lasr_pipeline_temp = lasr_read +
+          lasr_classify +
+          lasr_denoise +
+          lasr_dtm_norm_fn(
+            dtm_file_name = dtm_file_name
+            , frac_for_tri = frac_for_tri
+            , dtm_res = dtm_res_m
+            , norm_accuracy = normalization_accuracy
+          ) + 
+          lasr_write_normalize +
+          lasr_chm_fn(
+            chm_file_name = chm_file_name
+             , chm_res = chm_res_m
+             , min_height_m = min_height
+             , max_height_m = max_height
+          )
     }
-  
-  ################
-  # buld pipeline
-  ################
-  if(keep_intermediate_files == T){
-    # set up intermediate file write steps
-      # classify write step
-      lasr_write_classify = lasR::write_las(
-          ofile = paste0(config$las_classify_dir, "/*_classify.las")
-          , filter = "-drop_noise -drop_duplicates"
-          , keep_buffer = F
-        )
-    # pipeline
-      lasr_pipeline_temp = lasr_read +
-        lasr_classify + lasr_denoise +
-        lasr_write_classify + 
-        lasr_triangulate +
-        lasr_dtm +
-        lasr_normalize + lasr_write_normalize +
-        # lasr_normalize_expose() + lasr_write_normalize +
-        lasr_chm + lasr_chm_pitfill
-  }else{
-    # pipeline
-      lasr_pipeline_temp = lasr_read +
-        lasr_classify + lasr_denoise + 
-        lasr_triangulate +
-        lasr_dtm +
-        lasr_normalize + lasr_write_normalize +
-        # lasr_normalize_expose() + lasr_write_normalize +
-        lasr_chm + lasr_chm_pitfill
+    # message
+    message(
+      "starting lasR processing of processing grid (`process_data`) "
+      , processing_grid_num
+      , " at ..."
+      , Sys.time()
+    )
+    # lasR execute
+    lasr_ans = lasR::exec(
+      lasr_pipeline_temp
+      , on = tile_las_ctg
+      , with = list(
+        progress = T
+      )
+    )
+    # sleep
+    Sys.sleep(4) # sleep to give c++ stuff time to reset
+    return(lasr_ans)
   }
+      
 ######################################
 # execute pipeline
 ######################################
-  # with multiple high density clouds...memory was issue
-    # force lasR::exec to operate with specified buffer using lidR LASCatalog settings
-      # these settings take precedence
-    tile_las_ctg = lidR::readLAScatalog(process_flist)
-    lidR::opt_chunk_buffer(tile_las_ctg) = 10
-    lidR::opt_chunk_size(tile_las_ctg) = 0
-  # message
-    message(
-      # "starting lasR processing with a chunk size of "
-      # , got_chunk_size
-      # , " (0 = no chunking) and a buffer of "
-      # , lidR::opt_chunk_buffer(las_ctg)
-      "starting lasR processing at"
-      , "..."
-      , Sys.time()
-    )
   # set lasR parallel processing options as of lasR 0.4.2
     lasR::set_parallel_strategy(
       strategy = lasR::concurrent_points(
           ncores = max(lasR::ncores()-1, lasR::half_cores())
         )
     )
-  # lasR execute
-    lasr_ans = lasR::exec(
-      lasr_pipeline_temp
-      # , on = process_flist # defined above in retile step
-      , on = tile_las_ctg
-      # set lasR exec processing options as of lasR 0.4.2
-      , with = list(
-        progress = T
-        # , buffer = 10 #las_grid_buff_m # 10
-        # , chunk = 200 #las_grid_res_m # 100
-      )
-    )
-  
+  # map over processing grids
+    lasr_ans_list = 
+      process_data$processing_grid %>%
+      unique() %>%
+      # c(8) %>% 
+      purrr::map(lasr_pipeline_fn) 
+    # %>% 
+    #   c() %>% 
+    #   unlist()
+      
   # clean up
     remove(list = ls()[grep("_temp",ls())])
     gc()
@@ -490,89 +818,182 @@ xxst_time = Sys.time()
 ###################################
 # lasR cleanup and polish
 ###################################
+  ###############
+  # DTM 
+  ###############
+    # output name
+    dtm_file_name = paste0(config$delivery_dir, "/dtm_", desired_dtm_res, "m.tif")
+    # read
+    rast_list_temp = list.files(config$dtm_dir, pattern = ".*\\.(tif|tiff)$", full.names = T) %>% purrr::map(function(x){terra::rast(x)})
+    # mosaic
+    dtm_rast = terra::sprc(rast_list_temp) %>% terra::mosaic(fun = "mean")
+    # fill empty cells
+      dtm_rast = dtm_rast %>%
+        terra::crop(
+          las_ctg@data$geometry %>%
+            sf::st_union() %>%
+            terra::vect() %>%
+            terra::project(terra::crs(dtm_rast))
+        ) %>%
+        terra::mask(
+          las_ctg@data$geometry %>%
+            sf::st_union() %>%
+            terra::vect() %>%
+            terra::project(terra::crs(dtm_rast))
+        ) %>%
+        terra::focal(
+          w = 3
+          , fun = "mean"
+          , na.rm = T
+          # na.policy Must be one of:
+            # "all" (compute for all cells)
+            # , "only" (only for cells that are NA)
+            # , or "omit" (skip cells that are NA).
+          , na.policy = "only"
+        )
+      # dtm_rast %>% terra::crs()
+      # dtm_rast %>% terra::plot()
+    # set crs
+      terra::crs(dtm_rast) = proj_crs
+    # write to delivery directory
+      terra::writeRaster(
+        dtm_rast
+        , filename = dtm_file_name
+        , overwrite = T
+      )
+  ###############
+  # chm 
+  ###############
+    # output name
+    chm_file_name = paste0(config$delivery_dir, "/chm_", desired_chm_res, "m.tif")
+    # read
+    rast_list_temp = list.files(config$chm_dir, pattern = ".*\\.(tif|tiff)$", full.names = T) %>% purrr::map(function(x){terra::rast(x)})
+    # mosaic
+    chm_rast = terra::sprc(rast_list_temp) %>% terra::mosaic(fun = "max")
+    # fill empty cells
+      chm_rast = chm_rast %>%
+        terra::crop(
+          las_ctg@data$geometry %>%
+            sf::st_union() %>%
+            terra::vect() %>%
+            terra::project(terra::crs(chm_rast))
+        ) %>%
+        terra::mask(
+          las_ctg@data$geometry %>%
+            sf::st_union() %>%
+            terra::vect() %>%
+            terra::project(terra::crs(chm_rast))
+        ) %>%
+        terra::focal(
+          w = 3
+          , fun = "mean"
+          , na.rm = T
+          # na.policy Must be one of:
+            # "all" (compute for all cells)
+            # , "only" (only for cells that are NA)
+            # , or "omit" (skip cells that are NA).
+          , na.policy = "only"
+        )
+      # chm_rast %>% terra::crs()
+      # chm_rast %>% terra::plot()
+    # set crs
+      terra::crs(chm_rast) = proj_crs
+    # write to delivery directory
+      terra::writeRaster(
+        chm_rast
+        , filename = chm_file_name
+        , overwrite = T
+      )
+  
+  
+    
   # lasr_ans %>% str()
   # lasr_ans$pit_fill %>% terra::plot()
   # lasr_ans$pit_fill %>% terra::crs()
   # lasr_ans[[length(lasr_ans)]] %>% terra::plot()
   
-  # fill dtm cells that are missing still with the mean of a window
-    dtm_rast = terra::rast(dtm_file_name)
-    dtm_rast = dtm_rast %>%
-      terra::crop(
-        las_ctg@data$geometry %>% 
-          sf::st_union() %>% 
-          terra::vect() %>% 
-          terra::project(terra::crs(dtm_rast))
-      ) %>% 
-      terra::mask(
-        las_ctg@data$geometry %>% 
-          sf::st_union() %>% 
-          terra::vect() %>% 
-          terra::project(terra::crs(dtm_rast))
-      ) %>% 
-      terra::focal(
-        w = 3
-        , fun = "mean"
-        , na.rm = T
-        # na.policy Must be one of:
-          # "all" (compute for all cells)
-          # , "only" (only for cells that are NA)
-          # , or "omit" (skip cells that are NA).
-        , na.policy = "only"
-      )
-    # dtm_rast %>% terra::crs()
-    # dtm_rast %>% terra::plot()
-    
-  # write to delivery directory
-    terra::writeRaster(
-      dtm_rast
-      , filename = dtm_file_name
-      , overwrite = T
-    )
+  # # fill dtm cells that are missing still with the mean of a window
+  #   dtm_rast = terra::rast(dtm_file_name)
+  #   dtm_rast = dtm_rast %>%
+  #     terra::crop(
+  #       las_ctg@data$geometry %>% 
+  #         sf::st_union() %>% 
+  #         terra::vect() %>% 
+  #         terra::project(terra::crs(dtm_rast))
+  #     ) %>% 
+  #     terra::mask(
+  #       las_ctg@data$geometry %>% 
+  #         sf::st_union() %>% 
+  #         terra::vect() %>% 
+  #         terra::project(terra::crs(dtm_rast))
+  #     ) %>% 
+  #     terra::focal(
+  #       w = 3
+  #       , fun = "mean"
+  #       , na.rm = T
+  #       # na.policy Must be one of:
+  #         # "all" (compute for all cells)
+  #         # , "only" (only for cells that are NA)
+  #         # , or "omit" (skip cells that are NA).
+  #       , na.policy = "only"
+  #     )
+  #   # dtm_rast %>% terra::crs()
+  #   # dtm_rast %>% terra::plot()
+  #   
+  # # write to delivery directory
+  #   terra::writeRaster(
+  #     dtm_rast
+  #     , filename = dtm_file_name
+  #     , overwrite = T
+  #   )
   
-  # fill chm cells that are missing still with the mean of a window
-    chm_rast = terra::rast(chm_file_name)
-    chm_rast = chm_rast %>%
-      terra::crop(
-        las_ctg@data$geometry %>% 
-          sf::st_union() %>% 
-          terra::vect() %>% 
-          terra::project(terra::crs(chm_rast))
-      ) %>% 
-      terra::mask(
-        las_ctg@data$geometry %>% 
-          sf::st_union() %>% 
-          terra::vect() %>% 
-          terra::project(terra::crs(chm_rast))
-      ) %>% 
-      terra::focal(
-        w = 3
-        , fun = "mean"
-        , na.rm = T
-        # na.policy Must be one of:
-          # "all" (compute for all cells)
-          # , "only" (only for cells that are NA)
-          # , or "omit" (skip cells that are NA).
-        , na.policy = "only"
-      )
-    # chm_rast %>% terra::crs()
-    # chm_rast %>% terra::plot()
-    
-  # write to delivery directory
-    terra::writeRaster(
-      chm_rast
-      , filename = chm_file_name
-      , overwrite = T
-    )
+  # # fill chm cells that are missing still with the mean of a window
+  #   chm_rast = terra::rast(chm_file_name)
+  #   chm_rast = chm_rast %>%
+  #     terra::crop(
+  #       las_ctg@data$geometry %>% 
+  #         sf::st_union() %>% 
+  #         terra::vect() %>% 
+  #         terra::project(terra::crs(chm_rast))
+  #     ) %>% 
+  #     terra::mask(
+  #       las_ctg@data$geometry %>% 
+  #         sf::st_union() %>% 
+  #         terra::vect() %>% 
+  #         terra::project(terra::crs(chm_rast))
+  #     ) %>% 
+  #     terra::focal(
+  #       w = 3
+  #       , fun = "mean"
+  #       , na.rm = T
+  #       # na.policy Must be one of:
+  #         # "all" (compute for all cells)
+  #         # , "only" (only for cells that are NA)
+  #         # , or "omit" (skip cells that are NA).
+  #       , na.policy = "only"
+  #     )
+  #   # chm_rast %>% terra::crs()
+  #   # chm_rast %>% terra::plot()
+  #   
+  # # write to delivery directory
+  #   terra::writeRaster(
+  #     chm_rast
+  #     , filename = chm_file_name
+  #     , overwrite = T
+  #   )
   
   # create spatial index files (.lax)
-    # normalize
+    # denoise
     create_lax_for_tiles(
-      las_file_list = list.files(config$las_normalize_dir, pattern = ".*\\.(laz|las)$", full.names = T)
+      las_file_list = list.files(config$las_denoise_dir, pattern = ".*\\.(laz|las)$", full.names = T)
     )
     # classify
     create_lax_for_tiles(
       las_file_list = list.files(config$las_classify_dir, pattern = ".*\\.(laz|las)$", full.names = T)
+    )
+    # normalize
+    create_lax_for_tiles(
+      las_file_list = list.files(config$las_normalize_dir, pattern = ".*\\.(laz|las)$", full.names = T)
     )
   
   # clean up
@@ -622,1596 +1043,219 @@ chm_rast %>%
     scale_fill_viridis_c(option = "plasma") +
     theme_void()
 
-#################################################################################
-#################################################################################
-# Detect tree stems 
-#################################################################################
-#################################################################################
-
-  ###_____________________________________________________###
-  ### Define function to map for potential tree locations ###
-  ### Using TreeLS::treeMap                               ###
-  ###_____________________________________________________###
-  ### Function to map for potential tree locations with error handling
-    tree_map_function <- function(las){
-      result <- tryCatch(
-        expr = {
-          map = TreeLS::treeMap(
-            las = las
-            , method = map.hough(
-              # height thresholds applied to filter a point cloud before processing
-              min_h = 1
-              , max_h = 5
-              # height interval to perform point filtering/assignment/classification
-              , h_step = 0.5
-              # pixel side length to discretize the point cloud layers 
-                # while performing the Hough Transform circle search
-              , pixel_size = 0.025
-              # largest tree diameter expected in the point cloud
-              , max_d = 0.75 # 0.75m = 30in
-              # minimum point density (0 to 1) within a pixel evaluated 
-                # on the Hough Transform - i.e. only dense point clousters will undergo circle search
-                # hey google, define "clouster" ?
-              , min_density = 0.0001
-              # minimum number of circle intersections over a pixel 
-                # to assign it as a circle center candidate.
-              , min_votes = 3
-            )
-            # parameter passed down to treeMap.merge (if merge > 0)
-            , merge = 0
-          )
-        },
-        error = function(e) {
-          message <- paste("Error:", e$message)
-          return(message)
-        }
-      )
-      if (inherits(result, "error")) {
-        return(result)
-      } else {
-        return(result)
-      }
-    }
-  
-  ## Define the stem processing function
-    # This function combines `TreeLS` processing to the normalized point cloud to: 
-    # 
-    # 1) Apply the `TreeLS::treeMap` [stem detection function](#detect_stem_fn)
-    # 2) Merge overlapping tree coordinates using `TreeLS::treeMap.merge`
-    # 3) Assign tree IDs to the original points using `TreeLS::treePoints`
-    # 4) Flag only the stem points using `TreeLS::stemPoints`
-    # 5) DBH estimation is done using `TreeLS::tlsInventory`
-    # 
-    # The result writes: 
-      # i) a `laz` to the `r config$las_stem_dir` directory with the 
-      #   `Classification` data updated to: 
-      #     ground points (class 2); 
-      #     water points (class 9); 
-      #     stem points (class 4); non-stem (class 5). 
-      # ii) Also written is a `parquet` file with the tree identification stem locations, heights, and DBH estimates.
-  
-  # pass this function a file path of the normalized las you wish to detect stems and classify
-    write_stem_las_fn <- function(las_path_name, min_tree_height = 2) {
-        ### Get the desired las file
-        las_name = basename(las_path_name)
-        
-        ### See if the las file has been generated
-        path_to_check = paste0(config$las_stem_dir, "/", las_name)
-        does_file_exist = file.exists(path_to_check)
-        ### See if the vector file has been generated
-        path_to_check = paste0(config$stem_poly_tile_dir, "/", tools::file_path_sans_ext(las_name), ".parquet")
-        does_file_exist2 = file.exists(path_to_check)
-        # does_file_exist2
-        
-        # IF FILES DO NOT EXIST...DO IT
-        if(does_file_exist == F | does_file_exist2 == F){
-          ### Read in the desired las file
-          las_norm_tile = lidR::readLAS(las_path_name)
-          las_norm_tile = lidR::filter_poi(las_norm_tile, Z >= 0)
-          
-          # get the maximum point height
-          max_point_height = max(las_norm_tile@data$Z)
-          
-          # IF MAX HEIGHT GOOD...KEEP DOING IT
-          if(max_point_height >= min_tree_height){
-            ###______________________________________________________________###
-            ### 1) Apply the `TreeLS::treeMap` [stem detection function](#detect_stem_fn)
-            ###______________________________________________________________###
-            ### Run the function to search for candidate locations
-            treemap_temp = tree_map_function(las_norm_tile)
-            
-            ### If the class of the result == "LAS"...REALLY KEEP DOING IT
-            if(class(treemap_temp) == "LAS"){
-              ###______________________________________________________________###
-              ### 2) Merge overlapping tree coordinates using `TreeLS::treeMap.merge`
-              ###______________________________________________________________###
-              treemap_temp = TreeLS::treeMap.merge(treemap_temp)
-              ###______________________________________________________________###
-              ### 3) Assign tree IDs to the original points using `TreeLS::treePoints`
-              ###______________________________________________________________###
-              ### Classify tree regions
-              ## Assigns TreeIDs to a LAS object based on coordinates extracted from a treeMap object.
-              las_norm_tile = TreeLS::treePoints(
-                las = las_norm_tile
-                , map = treemap_temp
-                , method = trp.crop(l = 3)
-              )
-              # plot(las_norm_tile, color = "TreeID")
-              
-              ###______________________________________________________________###
-              ### 4) Flag only the stem points using `TreeLS::stemPoints`
-              ###______________________________________________________________###
-              ### Classify stem points
-              las_norm_tile = TreeLS::stemPoints(
-                las = las_norm_tile
-                , method = stm.hough(
-                  # height interval to perform point filtering/assignment/classification.
-                  h_step = 0.5
-                  # largest tree diameter expected in the point cloud
-                  , max_d = 0.75 # 0.75m = 30in
-                  # tree base height interval to initiate circle search
-                  , h_base = c(1, 2.5)
-                  #  pixel side length to discretize the point cloud layers 
-                    # while performing the Hough Transform circle search.
-                  , pixel_size = 0.025
-                  # minimum point density (0 to 1) within a pixel evaluated 
-                    # on the Hough Transform - i.e. only dense point clousters will undergo circle search
-                    # hey google, define "clouster" ?
-                  , min_density = 0.1
-                  # minimum number of circle intersections over a pixel 
-                    # to assign it as a circle center candidate.
-                  , min_votes = 3
-                )
-              )
-              
-              ###______________________________________________________________###
-              ### 5) DBH estimation is done using `TreeLS::tlsInventory`
-              ###______________________________________________________________###
-              ### Search through tree points and estimate DBH to return a data frame of results
-                tree_inv_df = TreeLS::tlsInventory(
-                  las = las_norm_tile
-                  # height layer (above ground) to estimate stem diameters, in point cloud units
-                  , dh = 1.37
-                  # height layer width, in point cloud units
-                  , dw = 0.2
-                  # parameterized shapeFit function, i.e. method to use for diameter estimation.
-                  , d_method = shapeFit(
-                    # either "circle" or "cylinder".
-                    shape = "circle"
-                    # optimization method for estimating the shape's parameters
-                    , algorithm = "ransac"
-                    # number of points selected on every RANSAC iteration.
-                    , n = 20
-                  )
-                )
-                # class(tree_inv_df)
-                # tree_inv_df %>% dplyr::glimpse()
-            if(nrow(tree_inv_df)>0){
-              ###_______________________________________________________###
-              ### 93) clean up the DBH stem data frame ###
-              ###_______________________________________________________###
-                # add details to table and convert to sf data
-                tree_inv_df = tree_inv_df %>% 
-                  dplyr::mutate(
-                    Radius = as.numeric(Radius)
-                    , dbh_m = Radius*2
-                    , dbh_cm = dbh_m*100
-                    , basal_area_m2 = pi * (Radius)^2
-                    , basal_area_ft2 = basal_area_m2 * 10.764
-                    , treeID = paste0(X, "_", Y)
-                    , stem_x = X
-                    , stem_y = Y
-                  ) %>% 
-                  sf::st_as_sf(coords = c("X", "Y"), crs = sf::st_crs(las_norm_tile)) %>% 
-                  dplyr::select(
-                    treeID, H, stem_x, stem_y, Radius, Error
-                    , dbh_m, dbh_cm, basal_area_m2, basal_area_ft2
-                  ) %>% 
-                  dplyr::rename(
-                    tree_height_m = H
-                    , radius_m = Radius
-                    , radius_error_m = Error
-                  )
-                # tree_inv_df %>% dplyr::glimpse()
-                
-                ### Remove points outside the bounding box of the laz tile + 1m buffer
-                tree_inv_df = tree_inv_df %>% 
-                  sf::st_crop(
-                    sf::st_bbox(las_norm_tile) %>% 
-                      sf::st_as_sfc() %>% 
-                      sf::st_buffer(1)
-                  )
-              
-              ###_______________________________________________________###
-              ### Set the classification codes of different point types ###
-              ###_______________________________________________________###
-              
-              ### Pull out the stem files
-              stem_points = lidR::filter_poi(las_norm_tile, Stem == TRUE)
-              stem_points@data$Classification = 4
-              
-              ### Pull out the ground points
-              ground = filter_poi(las_norm_tile, Classification %in% c(2,9))
-              
-              ### Pull out the remaining points that arent ground
-              remaining_points = filter_poi(las_norm_tile, Stem == FALSE & !(Classification %in% c(2,9)))
-              remaining_points@data$Classification = 5
-              
-              ### Combine the newly classified data
-              las_reclassified = rbind(stem_points, ground, remaining_points)
-              # str(las_reclassified)
-              # class(las_reclassified)
-              # plot(las_reclassified, color = "Classification")
-              
-              ###_______________________________________________________###
-              ### Write output to disk ###
-              ###_______________________________________________________###
-              ### Write the stem points to the disk
-              if(class(las_reclassified)=="LAS"){
-                lidR::writeLAS(las_reclassified, paste0(config$las_stem_dir, "/", las_name))
-              }
-              
-              ### Write stem polygons to the disk
-              out_name = tools::file_path_sans_ext(las_name)
-              out_name = paste0(config$stem_poly_tile_dir, "/", out_name, ".parquet")
-              if(max(class(tree_inv_df)=="sf")==1){
-                sfarrow::st_write_parquet(tree_inv_df, out_name)
-              }
-              return(T)
-            }else{return(F)} # nrow(tree_inv_df)>0
-          }else{return(F)} # tree_map_function() return is LAS
-        }else{return(F)} # max_point_height >= min_tree_height
-      }else{return(F)} # DOES FILE EXIST == F
-    } # write_stem_las_fn
-  
-  #######################################
-  ### call write_stem_las_fn
-  #######################################
-    
-    if(use_parallel_processing == T){
-      # Error in unserialize(socklist[[n]]) : error reading from connection
-      # means that one of the workers died when trying to process...try restarting
-      #######################################
-      ### a parallel version is:
-      #######################################
-        flist_temp = list.files(config$las_normalize_dir, pattern = ".*\\.(laz|las)$", full.names = T)
-        # configure parallel
-        cores = parallel::detectCores()
-        cluster = parallel::makeCluster(cores-1)
-        # register the parallel backend with the `foreach` package
-        doParallel::registerDoParallel(cluster)
-        # pass to foreach to process each lidar file in parallel
-          write_stem_las_ans = 
-            foreach::foreach(
-              i = 1:length(flist_temp)
-              , .packages = c("tools","lidR","tidyverse","doParallel","TreeLS")
-              , .inorder = F
-            ) %dopar% {
-              write_stem_las_fn(las_path_name = flist_temp[i], min_tree_height = minimum_tree_height_m)
-            } # end foreach
-          # write_stem_las_ans
-        # stop parallel
-        parallel::stopCluster(cluster)
-      #######################################
-      ### a parallel version is ^
-      #######################################
-    }else{
-      # map over the normalized point cloud tiles
-      write_stem_las_ans = 
-        list.files(config$las_normalize_dir, pattern = ".*\\.(laz|las)$", full.names = T) %>%
-          purrr::map(write_stem_las_fn, min_tree_height = minimum_tree_height_m)
-    }
-  
-  # get file list
-  las_stem_flist = list.files(config$las_stem_dir, pattern = ".*\\.(laz|las)$", full.names = T)
-  
-  # create spatial index files (.lax)
-  create_lax_for_tiles(las_stem_flist)
-  
-  # clean up
-    remove(list = ls()[grep("_temp",ls())])
-    gc()
-  
-#################################################################################
-#################################################################################
-# Combine Stem Vector Data to get points with sfm DBH estimates
-#################################################################################
-#################################################################################
-  # Combine the vector data written to the config$stem_poly_tile_dir directory as `parquet` tile files
-  ###__________________________________________________________###
-  ### Merge the stem vector location tiles into a single object ###
-  ###__________________________________________________________###
-  if(
-    length(list.files(config$stem_poly_tile_dir, pattern = ".*\\.parquet$", full.names = T)) > 0
-  ){
-    dbh_locations_sf = list.files(config$stem_poly_tile_dir, pattern = ".*\\.parquet$", full.names = T) %>% 
-        purrr::map(sfarrow::st_read_parquet) %>% 
-        dplyr::bind_rows() %>% 
-        sf::st_as_sf() %>% 
-        sf::st_make_valid() %>% 
-        sf::st_set_crs(proj_crs)
-  
-    ## Clean the Stem Vector Data
-    # The cleaning process uses the following steps:
-    # * remove stems with empty radius estimates from the `TreeLS::tlsInventory` DBH estimation step
-    # * remove stems >= DBH threshold set by the user in the parameter `dbh_max_size_m` (`r dbh_max_size_m`m in this example)
-    # * remove stems with empty or invalid xy coordinates
-    
-    dbh_locations_sf = dbh_locations_sf %>% 
-      dplyr::filter(
-        !is.na(radius_m)
-        & dbh_m <= dbh_max_size_m
-        & sf::st_is_valid(.)
-        & !sf::st_is_empty(.)
-      ) %>% 
-      dplyr::mutate(
-        condition = "detected_stem"
-      )
-  
-    ###___________________________________________________________###
-    ### Write the detected DBHs
-    ###___________________________________________________________###
-      sf:::st_write(
-        dbh_locations_sf
-        , dsn = paste0(config$delivery_dir, "/bottom_up_detected_stem_locations.gpkg")
-        , append = FALSE
-        , delete_dsn = TRUE
-        , quiet = TRUE
-      )
-  }else{dbh_locations_sf = NA}
-  # clean up
-  remove(list = ls()[grep("_temp",ls())])
-  gc()
-# start time
-  xx8_itd_start_time = Sys.time()
-#################################################################################
-#################################################################################
-# CHM Individual Tree Detection
-#################################################################################
-#################################################################################
-  ###__________________________________________________________###
-  ### Individual tree detection (ITD) 
-  ###__________________________________________________________###
-  # This section utilizes the Canopy Height Model (CHM) raster
-
-  ###_________________________________###
-  ### define the variable window function
-  ###_________________________________###
-  # (with a minimum window size of 2m and a maximum of 5m)
-  # define the variable window function
-    ws_fn = function(x) {
-      y = dplyr::case_when(
-        is.na(x) ~ 1e-3 # requires non-null
-        , x < 0 ~ 1e-3 # requires positive
-        , x < 2 ~ 1 # set lower bound
-        , x > 30 ~ 5  # set upper bound
-        , TRUE ~ 0.75 + (x * 0.14)
-      )
-      return(y)
-    }
-
-  ###___________________________________________________###
-  ### Individual tree detection using CHM (top down)
-  ###___________________________________________________###
-    ### ITD on CHM
-    # call the locate_trees function and pass the variable window
-    tree_tops = lidR::locate_trees(
-        chm_rast
-        , algorithm = lmf(
-          ws = ws_fn
-          , hmin = minimum_tree_height_m
-        )
-      )
-  
-    # # what it is?
-    #   ggplot() + 
-    #     geom_tile(
-    #       data = chm_rast %>% terra::aggregate(3) %>% as.data.frame(xy=T) %>% dplyr::rename(f=3)
-    #       , mapping = aes(x=x,y=y,fill=f)
-    #     ) +
-    #     geom_sf(
-    #       data = tree_tops
-    #       , shape = 20
-    #       , color = "black"
-    #       , size = 0.5
-    #     ) +
-    #     coord_sf(
-    #       expand = FALSE
-    #     ) +
-    #     scale_fill_viridis_c(option = "plasma") +
-    #     labs(fill = "Hgt. (m)", x = "", y = "") +
-    #     theme_light()
-      
-  # clean up
-    remove(list = ls()[grep("_temp",ls())])
-    gc()
-
-#################################################################################
-#################################################################################
-# Delineate Tree Crowns 
-#################################################################################
-#################################################################################
-  # delineate tree crowns raster and vector (i.e. polygon) shapes
-    # this takes way too looonnggggg ..........
-      # crowns = lidR::watershed(
-      #     # input raster layer !! works with stars !! ? not with terra ;[
-      #     chm = chm_rast %>% stars::st_as_stars()
-      #       # terra::subst(from = as.numeric(NA), to = 0)
-      #     # threshold below which a pixel cannot be a tree. Default is 2
-      #     , th_tree = minimum_tree_height_m
-      #   )() # keep this additional parentheses's so it will work ?lidR::watershed
-  
-    # using ForestTools instead ..........
-      crowns = ForestTools::mcws(
-        treetops = sf::st_zm(tree_tops, drop = T) # drops z values
-        , CHM = chm_rast
-        , minHeight = minimum_tree_height_m
-      )
-    
-    # str(crowns)
-    # plot(crowns, col = (viridis::turbo(2000) %>% sample()))
-    # crowns %>% terra::freq() %>% nrow()
-    
-  ### Write the crown raster to the disk
-    terra::writeRaster(
-      crowns
-      , paste0(config$delivery_dir, "/top_down_detected_tree_crowns.tif")
-      , overwrite = TRUE
-    )
-  
-  # clean up
-    remove(list = ls()[grep("_temp",ls())])
-    gc()
-# start time
-  xx9_competition_start_time = Sys.time()
-#################################################################################
-#################################################################################
-# Calculate local tree competition metrics for use in modelling
-#################################################################################
-#################################################################################
-  # From [Tinkham et al. (2022)]
-  # Local competition metrics, including: 
-    # the distance to the nearest neighbor
-    # , trees ha^−1^ within a 5 m radius
-    # , and the relative tree height within a 5 m radius
-    
-  ### add tree data to tree_tops
-  tree_tops = tree_tops %>% 
-    # pull out the coordinates and update treeID
-    dplyr::mutate(
-      tree_x = sf::st_coordinates(.)[,1]
-      , tree_y = sf::st_coordinates(.)[,2]
-      , tree_height_m = sf::st_coordinates(.)[,3]
-      , treeID = paste(treeID,round(tree_x, 1),round(tree_y, 1), sep = "_")
-    )
-  # str(tree_tops)
-    
-  ### set buffer around tree to calculate competition metrics
-  competition_buffer_m = 5
-  ### how much of the buffered tree area is within the study boundary?
-    # use this to scale the TPA estimates below
-  tree_tops_pct_buffer_temp = tree_tops %>% 
-    # buffer point
-    sf::st_buffer(competition_buffer_m) %>% 
-    dplyr::mutate(
-      point_buffer_area_m2 = as.numeric(sf::st_area(.))
-    ) %>% 
-    # intersect with study bounds
-    sf::st_intersection(
-      las_ctg@data$geometry %>% 
-        sf::st_union() %>% 
-        sf::st_as_sf()
-    ) %>% 
-    # calculate area of buffer within study
-    dplyr::mutate(
-      buffer_area_in_study_m2 = as.numeric(sf::st_area(.))
-    ) %>% 
-    sf::st_drop_geometry() %>% 
-    dplyr::select(treeID, buffer_area_in_study_m2)
-  
-  ### use the tree top location points to get competition metrics
-  comp_tree_tops_temp = tree_tops %>% 
-    # buffer point
-    sf::st_buffer(competition_buffer_m) %>% 
-    dplyr::select(treeID, tree_height_m) %>% 
-    # spatial join with all tree points
-    sf::st_join(
-      tree_tops %>% 
-        dplyr::select(treeID, tree_height_m) %>% 
-        dplyr::rename_with(
-          .fn = ~ paste0("comp_",.x)
-          , .cols = tidyselect::everything()[
-              -dplyr::any_of(c("geometry"))
-            ]
-        )
-    ) %>%
-    sf::st_drop_geometry() %>% 
-    # calculate metrics by treeID
-    dplyr::group_by(treeID,tree_height_m) %>% 
-    dplyr::summarise(
-      n_trees = dplyr::n()
-      , max_tree_height_m = max(comp_tree_height_m)
-    ) %>% 
-    dplyr::ungroup() %>% 
-    dplyr::inner_join(
-      tree_tops_pct_buffer_temp
-      , by = dplyr::join_by("treeID")
-    ) %>% 
-    dplyr::mutate(
-      comp_trees_per_ha = (n_trees/buffer_area_in_study_m2)*10000
-      , comp_relative_tree_height = tree_height_m/max_tree_height_m*100
-    ) %>% 
-    dplyr::select(
-      treeID, comp_trees_per_ha, comp_relative_tree_height
-    )
-  
-  ### calculate distance to nearest neighbor
-    ### cap distance to nearest tree within xxm buffer
-    dist_buffer_temp = 35
-    # get trees within radius
-    dist_tree_tops_temp = tree_tops %>% 
-      dplyr::select(treeID) %>% 
-      # buffer point
-      sf::st_buffer(dist_buffer_temp) %>% 
-      # spatial join with all tree points
-      sf::st_join(
-        tree_tops %>% 
-          dplyr::select(treeID, tree_x, tree_y) %>% 
-          dplyr::rename(treeID2=treeID)
-      ) %>% 
-      dplyr::filter(treeID != treeID2)
-    
-    # calculate row by row distances 
-    dist_tree_tops_temp = dist_tree_tops_temp %>% 
-      sf::st_centroid() %>% 
-      st_set_geometry("geom1") %>% 
-      dplyr::bind_cols(
-        dist_tree_tops_temp %>% 
-          sf::st_drop_geometry() %>% 
-          dplyr::select("tree_x", "tree_y") %>% 
-          sf::st_as_sf(coords = c("tree_x", "tree_y"), crs = sf::st_crs(tree_tops)) %>% 
-          st_set_geometry("geom2")
-      ) %>% 
-      dplyr::mutate(
-        comp_dist_to_nearest_m = sf::st_distance(geom1, geom2, by_element = T) %>% as.numeric()
-      ) %>% 
-      sf::st_drop_geometry() %>% 
-      dplyr::select(treeID,comp_dist_to_nearest_m) %>% 
-      dplyr::group_by(treeID) %>% 
-      dplyr::summarise(comp_dist_to_nearest_m = min(comp_dist_to_nearest_m, na.rm = T)) %>% 
-      dplyr::ungroup()
-  
-  # dist_tree_tops_temp = dplyr::tibble(
-  #   comp_dist_to_nearest_m = tree_tops %>% 
-  #     sf::st_distance(
-  #       tree_tops
-  #       , by_element = F
-  #     ) %>%
-  #     # get minimum by row (margin=1) and remove 0 dist for dist to self
-  #     apply(MARGIN=1,FUN=function(x){min(ifelse(x==0,NA,x),na.rm = T)})
-  # )
-  gc()
-
-  ### join with original tree tops data
-  tree_tops = tree_tops %>% 
-    dplyr::left_join(
-      comp_tree_tops_temp
-      , by = dplyr::join_by("treeID")
-    ) %>% 
-    # add distance
-    dplyr::left_join(
-      dist_tree_tops_temp
-      , by = dplyr::join_by("treeID")
-    ) %>% 
-    dplyr::mutate(comp_dist_to_nearest_m = dplyr::coalesce(comp_dist_to_nearest_m,dist_buffer_temp))
-  
-  ### Write the trees to the disk
-    sf::st_write(
-      tree_tops
-      , paste0(config$delivery_dir, "/top_down_detected_tree_tops.gpkg")
-      , quiet = TRUE, append = FALSE
-    )
-
-  # clean up
-  remove(list = ls()[grep("_temp",ls())])
-  gc()
-# start time
-  xx10_estdbh_start_time = Sys.time()
-#################################################################################
-#################################################################################
-# Spatial join the tree tops with the tree crowns
-#################################################################################
-#################################################################################
-  ### Convert crown raster to polygons, then to Sf
-    crowns_sf = crowns %>% 
-      # convert raster to polygons for each individual crown
-      terra::as.polygons() %>% 
-      # fix polygon validity
-      terra::makeValid() %>% 
-      # reduce the number of nodes in geometries
-      terra::simplifyGeom() %>% 
-      # remove holes in polygons
-      terra::fillHoles() %>% 
-      # convert to sf
-      sf::st_as_sf() %>% 
-      dplyr::rename(layer = 1) %>% 
-      # get the crown area
-      dplyr::mutate(
-        crown_area_m2 = as.numeric(sf::st_area(.))
-      ) %>% 
-      #remove super small crowns
-      dplyr::filter(
-        crown_area_m2 > 0.1
-      )
-    
-  # str(crowns_sf)
-  # ggplot(crowns_sf) + geom_sf(aes(fill=as.factor(layer)),color=NA) +
-  #   scale_fill_manual(values = viridis::turbo(nrow(crowns_sf)) %>% sample()) +
-  #   theme_void() + theme(legend.position = "none")
-  # 
-  ### Join the crowns with the tree tops to append data, remove Nulls
-  crowns_sf = crowns_sf %>%
-    sf::st_join(tree_tops) %>% 
-    dplyr::group_by(layer) %>% 
-    dplyr::mutate(n_trees = dplyr::n()) %>% 
-    dplyr::group_by(treeID) %>% 
-    dplyr::mutate(n_crowns = dplyr::n()) %>% 
-    dplyr::ungroup() %>% 
-    dplyr::filter(
-      n_trees==1 
-      | (n_trees>1 & n_crowns==1) # keeps the treeID that only has one crown if multiple trees to one crown
-    ) %>% 
-    dplyr::select(c(
-      "treeID", "tree_height_m"
-      , "tree_x", "tree_y"
-      , "crown_area_m2"
-      , tidyselect::starts_with("comp_")
-    ))
-  # str(crowns_sf)
-  
-  ### Add crown data summaries
-  crown_sum_temp = data.frame(
-      mean_crown_ht_m = terra::extract(x = chm_rast, y = terra::vect(crowns_sf), fun = "mean", na.rm = T)
-      , median_crown_ht_m = terra::extract(x = chm_rast, y = terra::vect(crowns_sf), fun = "median", na.rm = T)
-      , min_crown_ht_m = terra::extract(x = chm_rast, y = terra::vect(crowns_sf), fun = "min", na.rm = T)
-    ) %>% 
-    dplyr::select(-c(tidyselect::ends_with(".ID"))) %>% 
-    dplyr::rename_with(~ stringr::str_remove_all(.x,".Z")) %>% 
-    dplyr::rename_with(~ stringr::str_remove_all(.x,".focal_mean"))
-  
-  ### join crown data summary
-  crowns_sf = crowns_sf %>% 
-    dplyr::bind_cols(crown_sum_temp)
-  # str(crowns_sf)
-  
-  ### Write the crowns to the disk
-    sf::st_write(
-      crowns_sf
-      , paste0(config$delivery_dir, "/top_down_detected_crowns.gpkg")
-      , quiet = TRUE, append = FALSE
-    )
-  
-remove(list = ls()[grep("_temp",ls())])
-gc()
-
-#################################################################################
-#################################################################################
-# Model Missing DBH's
-#################################################################################
-#################################################################################
-  # This section uses the sample of DBH values extracted from the point cloud 
-   # in the Detect Stems section to create a model using the SfM extracted height, 
-    # crown area, and competition metrics as independent variables, 
-    # and the SfM-derived DBH as the dependent variable.
-
-  ## Join CHM derived Crowns with DBH stems
-
-  ###________________________________________________________###
-  ### Join the Top down crowns with the stem location points ###
-  ###________________________________________________________###
-    ### Join the top down crowns with the stem location points
-    ## !! Note that one crown can have multiple stems within its bounds
-    if(dplyr::coalesce(nrow(dbh_locations_sf),0)>0){
-      crowns_sf_joined_stems_temp = crowns_sf %>%
-        sf::st_join(
-          dbh_locations_sf %>% 
-            # rename all columns to have "stem" prefix
-            dplyr::rename_with(
-              .fn = ~ paste0("stem_",.x,recycle0 = T)
-              , .cols = tidyselect::everything()[
-                -dplyr::any_of(
-                  c(tidyselect::starts_with("stem_"),"stem_x", "stem_y","geom","geometry")
-                )
-              ]
-            )
-        )
-    }else{
-      crowns_sf_joined_stems_temp = crowns_sf %>% dplyr::mutate(stem_dbh_cm = as.numeric(NA))
-    }
-    # str(crowns_sf_joined_stems_temp)
-  ###________________________________________________________###
-  ## Filter the SfM DBHs
-  ###________________________________________________________###
-
-    # 1) Predict an expected DBH value for each [CHM derived tree height](#chm_tree_detect) based on the regional model
-    # 2) Remove stem DBH estimates that are outside the 90% prediction bounds
-    # 3) Select the stem DBH estimate that is closest to the predicted DBH value (from 1) if multiple stems are within the bounds of one crown
-    # 4) Use the SfM-detected stems remaining after this filtering workflow as the training data in the local DBH to height allometric relationship model
-
-    ### Representative FIA Plots and Data
-
-    ###__________________________________________________###
-    ### read in FIA data ###
-    ###__________________________________________________###
-    # read in treemap data
-    # downloaded from: https://www.fs.usda.gov/rds/archive/Catalog/RDS-2021-0074
-    # read in treemap (no memory is taken)
-    treemap_rast = terra::rast(paste0(input_treemap_dir, "/TreeMap2016.tif"))
-    
-    ### filter treemap based on las...rast now in memory
-    treemap_rast = treemap_rast %>% 
-      terra::crop(
-        las_ctg@data$geometry %>% 
-          sf::st_union() %>% 
-          terra::vect() %>% 
-          terra::project(terra::crs(treemap_rast))
-      ) %>% 
-      terra::mask(
-        las_ctg@data$geometry %>% 
-          sf::st_union() %>% 
-          terra::vect() %>% 
-          terra::project(terra::crs(treemap_rast))
-      )
-    
-    # ggplot(treemap_rast %>% as.data.frame(xy=T) %>% rename(f=3)) +
-    #   geom_tile(aes(x=x,y=y,fill=as.factor(f))) +
-    #   scale_fill_viridis_d(option = "turbo") +
-    #   theme_light() + theme(legend.position = "none")
-    
-    ### get weights for weighting each tree in the population models
-    # treemap id = tm_id for linking to tabular data 
-    tm_id_weight_temp = terra::freq(treemap_rast) %>%
-      dplyr::select(-layer) %>% 
-      dplyr::rename(tm_id = value, tree_weight = count) %>% 
-      dplyr::mutate(tm_id = as.character(tm_id))
-    # str(tm_id_weight_temp)
-
-    ### get the TreeMap FIA tree list for only the plots included
-    treemap_trees_df = readr::read_csv(
-        paste0(input_treemap_dir, "/TreeMap2016_tree_table.csv")
-        , col_select = c(
-          tm_id
-          , CN
-          , TREE
-          , STATUSCD
-          , DIA
-          , HT
-        )
-      ) %>% 
-      dplyr::rename_with(tolower) %>% 
-      dplyr::mutate(
-        cn = as.character(cn)
-        , tm_id = as.character(tm_id)
-      ) %>% 
-      dplyr::left_join(
-        tm_id_weight_temp
-        , by = dplyr::join_by("tm_id")
-      ) %>% 
-      dplyr::left_join(
-        tm_id_weight_temp %>% dplyr::rename(cn = tm_id)
-        , by = dplyr::join_by("cn")
-      ) %>% 
-      dplyr::mutate(tree_weight = dplyr::coalesce(tree_weight.x, tree_weight.y)) %>% 
-      dplyr::select(-c(tree_weight.x, tree_weight.y)) %>% 
-      dplyr::filter(
-        # keep live trees only: 1=live;2=dead
-        statuscd == 1
-        & !is.na(dia) 
-        & !is.na(ht) 
-        & !is.na(tree_weight)
-      ) %>%
-      dplyr::mutate(
-        dbh_cm = dia*2.54
-        , tree_height_m = ht/3.28084
-      ) %>% 
-      dplyr::select(-c(statuscd,dia,ht)) %>% 
-      dplyr::rename(tree_id=tree)  
-
-    ###__________________________________________________________###
-    ### Regional model of DBH as predicted by height 
-    ### population model of dbh on height, non-linear
-    ### used to filter sfm dbhs
-    ###__________________________________________________________###
-    gc()
-    # population model with no random effects (i.e. no group-level variation)
-    # non-linear model form with Gamma distribution for strictly positive response variable dbh
-    # set up prior
-    p_temp <- prior(normal(1, 2), nlpar = "b1") +
-      prior(normal(0, 2), nlpar = "b2")
-    mod_nl_pop = brms::brm(
-      formula = brms::bf(
-        formula = dbh_cm|weights(tree_weight) ~ (b1 * tree_height_m) + tree_height_m^b2
-        , b1 + b2 ~ 1
-        , nl = TRUE # !! specify non-linear
-      )
-      , data = treemap_trees_df
-      , prior = p_temp
-      , family = brms::brmsfamily("Gamma")
-      , iter = 4000
-    )
-    # plot(mod_nl_pop)
-    # summary(mod_nl_pop)
-    
-    ## write out model estimates to tabular file
-    #### extract posterior draws to a df
-    brms::as_draws_df(
-      mod_nl_pop
-      , variable = c("^b_", "shape")
-      , regex = TRUE
-    ) %>% 
-      # quick way to get a table of summary statistics and diagnostics
-      posterior::summarize_draws(
-        "mean", "median", "sd"
-        ,  ~quantile(.x, probs = c(
-          0.05, 0.95
-          , 0.025, 0.975
-        ))
-        , "rhat"
-      ) %>% 
-      dplyr::mutate(
-        variable = stringr::str_remove_all(variable, "_Intercept")
-        , formula = summary(mod_nl_pop)$formula %>% 
-          as.character() %>% 
-          .[1]
-      ) %>% 
-      write.csv(
-        paste0(config$delivery_dir, "/regional_dbh_height_model_estimates.csv")
-        , row.names = F
-      )
-    
-    ### obtain model predictions over range
-    # range of x var to predict
-    height_range = dplyr::tibble(
-      tree_height_m = seq(
-        from = 0
-        , to = 120 # tallest tree in the world
-        , by = 0.1 # by 0.1 m increments
-      )
-    )
-    # predict and put estimates in a data frame
-    pred_mod_nl_pop_temp = predict(
-      mod_nl_pop
-      , newdata = height_range
-      , probs = c(.05, .95)
-    ) %>%
-      dplyr::as_tibble() %>%
-      dplyr::rename(
-        lower_b = 3, upper_b = 4
-      ) %>% 
-      dplyr::rename_with(tolower) %>% 
-      dplyr::select(-c(est.error)) %>% 
-      dplyr::bind_cols(height_range) %>% 
-      dplyr::rename(
-        tree_height_m_tnth=tree_height_m
-        , est_dbh_cm = estimate
-        , est_dbh_cm_lower = lower_b
-        , est_dbh_cm_upper = upper_b
-      ) %>% 
-      dplyr::mutate(tree_height_m_tnth=as.character(tree_height_m_tnth)) %>% 
-      dplyr::relocate(tree_height_m_tnth)
-    # str(pred_mod_nl_pop_temp)
-    
-    # save predictions for reading later
-    write.csv(
-      pred_mod_nl_pop_temp
-      , file = paste0(config$delivery_dir, "/regional_dbh_height_model_predictions.csv")
-      , row.names = F
-    )
-
-    ###__________________________________________________________###
-    ### Predict and filter SfM-derived DBH
-    ###__________________________________________________________###
-      # str(crowns_sf_joined_stems_temp)
-      # attach allometric data to CHM derived trees and canopy data
-      crowns_sf_joined_stems_temp = crowns_sf_joined_stems_temp %>% 
-        # join with model predictions at 0.1 m height intervals
-        dplyr::mutate(
-          tree_height_m_tnth = round(tree_height_m,1) %>% as.character()
-        ) %>% 
-        dplyr::inner_join(
-          pred_mod_nl_pop_temp
-          , by = dplyr::join_by(tree_height_m_tnth)  
-        ) %>% 
-        dplyr::select(-tree_height_m_tnth) %>% 
-        dplyr::mutate(
-          est_dbh_pct_diff = abs(stem_dbh_cm-est_dbh_cm)/est_dbh_cm
-        )
-        # what is the estimated difference
-        # summary(crowns_sf_joined_stems_temp$est_dbh_pct_diff)
-        # crowns_sf_joined_stems_temp %>% dplyr::glimpse()
-        # crowns_sf_joined_stems_temp %>% dplyr::filter(!is.na(stem_dbh_cm)) %>% nrow()
-      
-      ### build training data set by filtering stems
-        dbh_training_data_temp = crowns_sf_joined_stems_temp %>%
-          sf::st_drop_geometry() %>% 
-          dplyr::filter(
-            !is.na(stem_dbh_cm)
-            & stem_dbh_cm > 0
-            & stem_dbh_cm >= est_dbh_cm_lower
-            & stem_dbh_cm <= est_dbh_cm_upper
-          ) %>% 
-          dplyr::group_by(treeID) %>% 
-          # select the minimum difference to regional dbh estimate
-          dplyr::filter(
-            est_dbh_pct_diff==min(est_dbh_pct_diff)
-          ) %>% 
-          # just take one if same dbh
-          dplyr::filter(
-            dplyr::row_number()==1
-          ) %>% 
-          dplyr::ungroup() %>% 
-          dplyr::select(c(
-            treeID # id
-            , stem_dbh_cm # y
-            # x vars
-            , tree_height_m
-            , crown_area_m2
-            , min_crown_ht_m
-            , tidyselect::starts_with("comp_")
-          ))
-      # dbh_training_data_temp %>% dplyr::glimpse()
-      if(nrow(dbh_training_data_temp)>10){
-        ###__________________________________________________________###
-        ### Build local model to estimate missing DBHs using SfM DBHs
-        ###__________________________________________________________###
-        # Use the SfM-detected stems remaining after the filtering workflow 
-        # for the local DBH to height allometric relationship model.
-        if(local_dbh_model == "rf"){
-          # set random seed
-          set.seed(21)
-          
-          ### tuning RF model
-          # If we are interested with just starting out and tuning the mtry parameter 
-          # we can use randomForest::tuneRF for a quick and easy tuning assessment. 
-          # tuneRf will start at a value of mtry that you supply and increase by a 
-          # certain step factor until the OOB error stops improving be a specified amount.
-          rf_tune_temp = randomForest::tuneRF(
-            y = dbh_training_data_temp$stem_dbh_cm
-            , x = dbh_training_data_temp %>% dplyr::select(-c(treeID,stem_dbh_cm))
-            , stepFactor = 0.5
-            , ntreeTry = 500
-            , mtryStart = 0.5
-            , improve = 0.01
-            , plot = F
-            , trace = F
-          )
-          # rf_tune_temp
-          
-          ### Run a randomForest model to predict DBH using various crown predictors
-          stem_prediction_model = randomForest::randomForest(
-            y = dbh_training_data_temp$stem_dbh_cm
-            , x = dbh_training_data_temp %>% dplyr::select(-c(treeID,stem_dbh_cm))
-            , mtry = rf_tune_temp %>% 
-              dplyr::as_tibble() %>% 
-              dplyr::filter(OOBError==min(OOBError)) %>% 
-              dplyr::pull(mtry)
-            , na.action = na.omit
-          )
-          # stem_prediction_model
-          # str(stem_prediction_model)
-          
-          # # variable importance plot
-          #   randomForest::varImpPlot(stem_prediction_model, main = "RF variable importance plot for DBH estimate")
-          
-          ## Estimated versus observed DBH
-          # data.frame(
-          #   dbh_training_data_temp
-          #   , predicted = stem_prediction_model$predicted
-          # ) %>% 
-          # ggplot() +
-          #   geom_abline() +
-          #   geom_point(mapping = aes(x = stem_dbh_cm, y = predicted)) +
-          #   scale_x_continuous(limits = c(0,max(dbh_training_data_temp$stem_dbh_cm)*1.05)) +
-          #   scale_y_continuous(limits = c(0,max(dbh_training_data_temp$stem_dbh_cm)*1.05)) +
-          #   labs(
-          #     x = "SfM DBH (cm)"
-          #     , y = "Predicted DBH (cm) by RF"
-          #   ) +
-          #   theme_light()
-            
-        }else{
-          # population model with no random effects (i.e. no group-level variation)
-          # Gamma distribution for strictly positive response variable dbh
-          stem_prediction_model = brms::brm(
-            formula = stem_dbh_cm ~ 1 + tree_height_m
-            , data = dbh_training_data_temp %>% 
-                dplyr::select(stem_dbh_cm, tree_height_m)
-            , family = brms::brmsfamily("Gamma", link = "log")
-            , prior = c(prior(gamma(0.01, 0.01), class = shape))
-            , iter = 4000
-            # , file = "../data/mod_lin"
-          )
-        }
-        
-        ###___________________________________________________________________###
-        ### Predict missing DBH values for the top down crowns with no DBH ###
-        ###___________________________________________________________________###
-        # nrow(dbh_training_data_temp)
-        # nrow(crowns_sf)
-        crowns_sf_predict_only_temp = crowns_sf %>%
-          sf::st_drop_geometry() %>% 
-          dplyr::anti_join(
-            dbh_training_data_temp %>% 
-              dplyr::select(treeID)
-            , by = dplyr::join_by("treeID")
-          ) %>% 
-          dplyr::select(
-            dbh_training_data_temp %>% dplyr::select(-c(stem_dbh_cm)) %>% names()
-          )
-        # str(crowns_sf_predict_only_temp)
-        
-        # get predicted dbh
-        predicted_dbh_cm_temp = predict(
-          stem_prediction_model
-          , crowns_sf_predict_only_temp %>% dplyr::select(-treeID)
-        ) %>% 
-        dplyr::as_tibble() %>% 
-        dplyr::pull(1)
-        # summary(predicted_dbh_cm_temp)
-        
-        ## combine predicted data with training data for full data set for all tree crowns with a matched tree top
-        # nrow(crowns_sf)
-        crowns_sf_with_dbh = crowns_sf %>%
-          # join with regional model predictions at 0.1 m height intervals
-          dplyr::mutate(
-            tree_height_m_tnth = round(tree_height_m,1) %>% as.character()
-          ) %>% 
-          dplyr::inner_join(
-            pred_mod_nl_pop_temp %>% 
-              dplyr::rename(
-                reg_est_dbh_cm = est_dbh_cm
-                , reg_est_dbh_cm_lower = est_dbh_cm_lower
-                , reg_est_dbh_cm_upper = est_dbh_cm_upper
-              )
-            , by = dplyr::join_by(tree_height_m_tnth)  
-          ) %>% 
-          dplyr::select(-tree_height_m_tnth) %>%
-          # join training data
-          dplyr::left_join(
-            dbh_training_data_temp %>% 
-              dplyr::mutate(is_training_data = T) %>% 
-              dplyr::select(treeID, is_training_data, stem_dbh_cm)
-            , by = dplyr::join_by("treeID")
-          ) %>% 
-          # join with predicted data estimates
-          dplyr::left_join(
-            crowns_sf_predict_only_temp %>% 
-              dplyr::mutate(
-                predicted_dbh_cm = predicted_dbh_cm_temp
-              ) %>% 
-              dplyr::select(treeID, predicted_dbh_cm)
-            , by = dplyr::join_by("treeID")
-          ) %>% 
-          # clean up data and calculate metrics from dbh
-          dplyr::mutate(
-            is_training_data = dplyr::coalesce(is_training_data,F)
-            , dbh_cm = dplyr::coalesce(stem_dbh_cm, predicted_dbh_cm, reg_est_dbh_cm)
-            , dbh_m = dbh_cm/100
-            , radius_m = dbh_m/2
-            , basal_area_m2 = pi * (radius_m)^2
-            , basal_area_ft2 = basal_area_m2 * 10.764
-          ) %>% 
-          dplyr::select(-c(stem_dbh_cm, predicted_dbh_cm))
-        
-        # nrow(crowns_sf_with_dbh)
-        # nrow(crowns_sf)
-        # nrow(tree_tops)
-        
-      }else{ # if(nrow(dbh_training_data_temp)>10)
-        ## combine predicted data with training data for full data set for all tree crowns with a matched tree top
-        # nrow(crowns_sf)
-        crowns_sf_with_dbh = crowns_sf %>%
-          # join with regional model predictions at 0.1 m height intervals
-          dplyr::mutate(
-            tree_height_m_tnth = round(tree_height_m,1) %>% as.character()
-          ) %>% 
-          dplyr::inner_join(
-            pred_mod_nl_pop_temp %>% 
-              dplyr::rename(
-                reg_est_dbh_cm = est_dbh_cm
-                , reg_est_dbh_cm_lower = est_dbh_cm_lower
-                , reg_est_dbh_cm_upper = est_dbh_cm_upper
-              )
-            , by = dplyr::join_by(tree_height_m_tnth)  
-          ) %>% 
-          dplyr::select(-tree_height_m_tnth) %>% 
-          # join training data
-          dplyr::mutate(
-            is_training_data = F
-            , stem_dbh_cm = as.numeric(NA)
-            , predicted_dbh_cm = as.numeric(NA)
-          ) %>% 
-          # clean up data and calculate metrics from dbh
-          dplyr::mutate(
-            is_training_data = dplyr::coalesce(is_training_data,F)
-            , dbh_cm = dplyr::coalesce(stem_dbh_cm, predicted_dbh_cm, reg_est_dbh_cm)
-            , dbh_m = dbh_cm/100
-            , radius_m = dbh_m/2
-            , basal_area_m2 = pi * (radius_m)^2
-            , basal_area_ft2 = basal_area_m2 * 10.764
-          ) %>% 
-          dplyr::select(-c(stem_dbh_cm, predicted_dbh_cm))
-        
-      } # else  
-    # ggplot(crowns_sf_with_dbh) + 
-    #   geom_sf(aes(fill=dbh_cm), color=NA) +
-    #   scale_fill_viridis_c(option="plasma") +
-    #   coord_sf(expand = F) +
-    #   theme_light()
-      
-    ### write the data to the disk
-      # crown vector polygons
-      sf::st_write(
-        crowns_sf_with_dbh
-        , paste0(config$delivery_dir, "/final_detected_crowns.gpkg")
-        , append = FALSE
-        , quiet = TRUE
-      )
-      # tree top vector points
-      sf::st_write(
-        # get tree points
-        crowns_sf_with_dbh %>% 
-          sf::st_drop_geometry() %>% 
-          sf::st_as_sf(coords = c("tree_x", "tree_y"), crs = sf::st_crs(crowns_sf_with_dbh))
-        , paste0(config$delivery_dir, "/final_detected_tree_tops.gpkg")
-        , append = FALSE
-        , quiet = TRUE
-      )
-
-    # clean up
-      remove(list = ls()[grep("_temp",ls())])
-      gc()
-# start time
-  xx11_silv_start_time = Sys.time()
-#################################################################################
-#################################################################################
-# Calculate Silviculture Metrics
-#################################################################################
-#################################################################################
-    # Common silvicultural metrics are calculated for the entire extent. 
-      # Note, that stand-level summaries can be computed if stand vector data is provided.
-      # metrics include:
-        # "n_trees"
-        # "plot_area_ha"
-        # "trees_per_ha"
-        # "mean_dbh_cm"
-        # "qmd_cm"
-        # "mean_tree_height_m"
-        # "loreys_height_m"
-        # "basal_area_m2"
-        # "basal_area_m2_per_ha"
-      
-    ### stand-level summaries
-      silv_metrics_temp = crowns_sf_with_dbh %>%
-        sf::st_drop_geometry() %>% 
-        dplyr::ungroup() %>% 
-        dplyr::mutate(
-          plotID = "1" # can spatially join to plot vectors if available
-          , plot_area_m2 = las_ctg@data$geometry %>% 
-            sf::st_union() %>% 
-            sf::st_area() %>% # result is m2
-            as.numeric()
-          , plot_area_ha = plot_area_m2/10000 # convert to ha
-        ) %>% 
-        dplyr::group_by(plotID,plot_area_ha) %>% 
-        dplyr::summarise(
-          n_trees = dplyr::n_distinct(treeID)
-          , mean_dbh_cm = mean(dbh_cm, na.rm = T)
-          , mean_tree_height_m = mean(tree_height_m, na.rm = T)
-          , loreys_height_m = sum(basal_area_m2*tree_height_m, na.rm = T) / sum(basal_area_m2, na.rm = T)
-          , basal_area_m2 = sum(basal_area_m2, na.rm = T)
-          , sum_dbh_cm_sq = sum(dbh_cm^2, na.rm = T)
-        ) %>% 
-        dplyr::ungroup() %>% 
-        dplyr::mutate(
-          trees_per_ha = (n_trees/plot_area_ha)
-          , basal_area_m2_per_ha = (basal_area_m2/plot_area_ha)
-          , qmd_cm = sqrt(sum_dbh_cm_sq/n_trees)
-        ) %>% 
-        dplyr::select(-c(sum_dbh_cm_sq)) %>% 
-        # convert to imperial units
-        dplyr::mutate(
-          dplyr::across(
-            .cols = tidyselect::ends_with("_cm")
-            , ~ .x * 0.394
-            , .names = "{.col}_in"
-          )
-          , dplyr::across(
-            .cols = tidyselect::ends_with("_m")
-            , ~ .x * 3.28
-            , .names = "{.col}_ft"
-          )
-          , dplyr::across(
-            .cols = tidyselect::ends_with("_m2_per_ha")
-            , ~ .x * 4.359
-            , .names = "{.col}_ftac"
-          )
-          , dplyr::across(
-            .cols = tidyselect::ends_with("_per_ha") & !tidyselect::ends_with("_m2_per_ha")
-            , ~ .x * 0.405
-            , .names = "{.col}_ac"
-          )
-          , dplyr::across(
-            .cols = tidyselect::ends_with("_area_ha")
-            , ~ .x * 2.471
-            , .names = "{.col}_ac"
-          )
-          , dplyr::across(
-            .cols = tidyselect::ends_with("_m2")
-            , ~ .x * 10.764
-            , .names = "{.col}_ft2"
-          )
-        ) %>% 
-        dplyr::rename_with(
-          .fn = function(x){dplyr::case_when(
-            stringr::str_ends(x,"_cm_in") ~ stringr::str_replace(x,"_cm_in","_in")
-            , stringr::str_ends(x,"_m_ft") ~ stringr::str_replace(x,"_m_ft","_ft")
-            , stringr::str_ends(x,"_m2_per_ha_ftac") ~ stringr::str_replace(x,"_m2_per_ha_ftac","_ft2_per_ac")
-            , stringr::str_ends(x,"_per_ha_ac") ~ stringr::str_replace(x,"_per_ha_ac","_per_ac")
-            , stringr::str_ends(x,"_area_ha_ac") ~ stringr::str_replace(x,"_area_ha_ac","_area_ac")
-            , stringr::str_ends(x,"_m2_ft2") ~ stringr::str_replace(x,"_m2_ft2","_ft2")
-            , TRUE ~ x
-          )}
-        ) %>% 
-        dplyr::select(
-          "plotID"
-          , "n_trees"
-          , "plot_area_ha"
-          , "trees_per_ha"
-          , "mean_dbh_cm"
-          , "qmd_cm"
-          , "mean_tree_height_m"
-          , "loreys_height_m"
-          , "basal_area_m2"
-          , "basal_area_m2_per_ha"
-          # imperial
-          , "plot_area_ac"
-          , "trees_per_ac"
-          , "mean_dbh_in"
-          , "qmd_in"
-          , "mean_tree_height_ft"
-          , "loreys_height_ft"
-          , "basal_area_ft2"
-          , "basal_area_ft2_per_ac"
-        )
-    
-    ### export tabular
-      write.csv(
-          silv_metrics_temp
-          , paste0(config$delivery_dir, "/final_plot_silv_metrics.csv")
-          , row.names = F
-        )
-    
-    # this would just be a vector file if available
-      silv_metrics_temp = las_ctg@data$geometry %>%
-        sf::st_union() %>% 
-        sf::st_as_sf() %>% 
-        dplyr::mutate(
-          plotID = "1" # can spatially join to plot vectors if available
-        ) %>% 
-        # join with plot data data
-        dplyr::inner_join(
-          silv_metrics_temp
-          , by = dplyr::join_by("plotID")
-        )
-  
-    ## summary table
-    silv_metrics_temp %>%
-      sf::st_drop_geometry() %>%
-      dplyr::filter(plotID==silv_metrics_temp$plotID[1]) %>%
-      tidyr::pivot_longer(
-        cols = -c(plotID)
-        , names_to = "measure"
-        , values_to = "value"
-      ) %>%
-      kableExtra::kbl(
-        caption = "Silvicultural metrics in both metric and imperial units"
-        , digits = 2
-      ) %>%
-      kableExtra::kable_styling()
-
-#################################################################################
-#################################################################################
-# clean up
-#################################################################################
-#################################################################################
-    # remove temp files
-    if(keep_intermediate_files==F){
-      unlink(config$temp_dir, recursive = T)
-    }
-    # clean up
-      remove(list = ls()[grep("_temp",ls())])
-      gc()
-#################################################################################
-#################################################################################
-# create data to return
-#################################################################################
-#################################################################################
-xx86_end_time = Sys.time()
-  # message
-    message(
-      "total time was "
-      , round(as.numeric(difftime(xx86_end_time, xx1_tile_start_time, units = c("mins"))),2)
-      , " minutes to process "
-      , scales::comma(sum(las_ctg@data$Number.of.point.records))
-      , " points over an area of "
-      , scales::comma(as.numeric(las_ctg@data$geometry %>% sf::st_union() %>% sf::st_area())/10000,accuracy = 0.01)
-      , " hectares"
-    )
-  # data
-  return_df = 
-      # data from las_ctg
-      las_ctg@data %>% 
-      st_set_geometry("geometry") %>% 
-      dplyr::summarise(
-        geometry = sf::st_union(geometry)
-        , number_of_points = sum(Number.of.point.records, na.rm = T)
-      ) %>% 
-      dplyr::mutate(
-        las_area_m2 = sf::st_area(geometry) %>% as.numeric()
-      ) %>% 
-      sf::st_drop_geometry() %>% 
-      dplyr::mutate(
-        timer_tile_time_mins = difftime(xx2_denoise_start_time, xx1_tile_start_time, units = c("mins")) %>% 
-          as.numeric()
-        , timer_denoise_time_mins = difftime(xx3_classify_start_time, xx2_denoise_start_time, units = c("mins")) %>% 
-          as.numeric()
-        , timer_classify_time_mins = difftime(xx4_dtm_start_time, xx3_classify_start_time, units = c("mins")) %>% 
-          as.numeric()
-        , timer_dtm_time_mins = difftime(xx5_normalize_start_time, xx4_dtm_start_time, units = c("mins")) %>% 
-          as.numeric()
-        , timer_normalize_time_mins = difftime(xx6_chm_start_time, xx5_normalize_start_time, units = c("mins")) %>% 
-          as.numeric()
-        , timer_chm_time_mins = difftime(xx7_treels_start_time, xx6_chm_start_time, units = c("mins")) %>% 
-          as.numeric()
-        , timer_treels_time_mins = difftime(xx8_itd_start_time, xx7_treels_start_time, units = c("mins")) %>% 
-          as.numeric()
-        , timer_itd_time_mins = difftime(xx9_competition_start_time, xx8_itd_start_time, units = c("mins")) %>% 
-          as.numeric()
-        , timer_competition_time_mins = difftime(xx10_estdbh_start_time, xx9_competition_start_time, units = c("mins")) %>% 
-          as.numeric()
-        , timer_estdbh_time_mins = difftime(xx11_silv_start_time, xx10_estdbh_start_time, units = c("mins")) %>% 
-          as.numeric()
-        , timer_silv_time_mins = difftime(xx86_end_time, xx11_silv_start_time, units = c("mins")) %>% 
-          as.numeric()
-        , timer_total_time_mins = difftime(xx86_end_time, xx1_tile_start_time, units = c("mins")) %>% 
-          as.numeric()
-        # settings
-        , sttng_input_las_dir = input_las_dir
-        , sttng_use_parallel_processing = as.character(use_parallel_processing)
-        , sttng_desired_chm_res = desired_chm_res
-        , sttng_max_height_threshold_m = max_height_threshold_m
-        , sttng_minimum_tree_height_m = minimum_tree_height_m
-        , sttng_dbh_max_size_m = dbh_max_size_m
-        , sttng_local_dbh_model = ifelse(local_dbh_model == "rf", local_dbh_model, "lin")
-        , sttng_user_supplied_epsg = as.character(user_supplied_epsg)
-        , sttng_las_grid_res_m = las_grid_res_m
-        , sttng_las_grid_buff_m = las_grid_buff_m
-        , sttng_competition_buffer_m = competition_buffer_m
-      )
-
-  # write 
-  write.csv(
-    return_df
-    , paste0(config$delivery_dir, "/processed_tracking_data.csv")
-    , row.names = F
-  )
-###########################################################################################################################
-###########################################################################################################################
-###########################################################################################################################
-###########################################################################################################################
-###########################################################################################################################
-###########################################################################################################################
-# testing differences in filtering for triangulation with high density point clds
-# ran kaibab_low, high_aggressive.las with different filtering for the number of points used for triangulation
-  # 400 pts/m2
-  # filter1 = 100% of points used (400 pts/m2)
-  # filter0.75 = 75% of points used (300 pts/m2)
-  # ....
-  # filter0.05 = 5% of points used (20 pts/m2)
-  
-  ### this is sloppy code but will suffice
-library(tidyverse)
-library(terra)
-library(brms)
-library(tidybayes)
-  
-r1 = terra::rast("c:/data/usfs/point_cloud_tree_detection_ex/data/03_delivery/filter1_chm_0.25m.tif")
-r2 = terra::rast("c:/data/usfs/point_cloud_tree_detection_ex/data/03_delivery/filter0.75_chm_0.25m.tif")
-r3 = terra::rast("c:/data/usfs/point_cloud_tree_detection_ex/data/03_delivery/filter0.5_chm_0.25m.tif")
-r4 = terra::rast("c:/data/usfs/point_cloud_tree_detection_ex/data/03_delivery/filter0.25_chm_0.25m.tif")
-r5 = terra::rast("c:/data/usfs/point_cloud_tree_detection_ex/data/03_delivery/filter0.19_chm_0.25m.tif")
-r6 = terra::rast("c:/data/usfs/point_cloud_tree_detection_ex/data/03_delivery/filter0.13_chm_0.25m.tif")
-r7 = terra::rast("c:/data/usfs/point_cloud_tree_detection_ex/data/03_delivery/filter0.05_chm_0.25m.tif")
-
-plot((r2-r1)/r1)
-
-l1 = as.matrix((r2-r1)/r1) %>% c()
-l1 = l1[!is.na(l1)]
-l2 = as.matrix((r3-r1)/r1) %>% c()
-l2 = l2[!is.na(l2)]
-l3 = as.matrix((r4-r1)/r1) %>% c()
-l3 = l3[!is.na(l3)]
-l4 = as.matrix((r5-r1)/r1) %>% c()
-l4 = l4[!is.na(l4)]
-l5 = as.matrix((r6-r1)/r1) %>% c()
-l5 = l5[!is.na(l5)]
-l6 = as.matrix((r7-r1)/r1) %>% c()
-l6 = l6[!is.na(l6)]
-
-dta = dplyr::bind_rows(
-    dplyr::tibble(
-      f = rep("300 pts.m2", length(l1))  
-      , pct_diff = l1
-    )
-    , dplyr::tibble(
-      f = rep("200 pts.m2", length(l2))  
-      , pct_diff = l2
-    )
-    , dplyr::tibble(
-      f = rep("100 pts.m2", length(l3))  
-      , pct_diff = l3
-    )
-    , dplyr::tibble(
-      f = rep("75 pts.m2", length(l4))  
-      , pct_diff = l4
-    )
-    , dplyr::tibble(
-      f = rep("50 pts.m2", length(l5))  
-      , pct_diff = l5
-    )
-    , dplyr::tibble(
-      f = rep("20 pts.m2", length(l6))  
-      , pct_diff = l6
-    )
-  ) %>% 
-  dplyr::mutate(
-    f = factor(
-      f
-      , ordered = T
-      , levels = c(
-        "300 pts.m2"
-        , "200 pts.m2"
-        , "100 pts.m2"
-        , "75 pts.m2"
-        , "50 pts.m2"
-        , "20 pts.m2"
-      )
-    )
-  )
-
-dta %>% dplyr::count(f)
-dta %>% dplyr::slice_sample(prop = 0.5) %>% ggplot(aes(x = f, y = pct_diff)) + geom_boxplot()
-
-# center
-mean_y = mean(dta$pct_diff)
-sd_y = sd(dta$pct_diff)
-dta$pct_diff_c = (dta$pct_diff-mean_y)/sd_y
-summary(dta$pct_diff_c)
-
-# stanvars
-gamma_a_b_from_omega_sigma <- function(mode, sd) {
-  if (mode <= 0) stop("mode must be > 0")
-  if (sd   <= 0) stop("sd must be > 0")
-  rate <- (mode + sqrt(mode^2 + 4 * sd^2)) / (2 * sd^2)
-  shape <- 1 + mode * rate
-  return(list(shape = shape, rate = rate))
-}
-
-mean_y_c = mean(dta$pct_diff_c)
-sd_y_c = sd(dta$pct_diff_c)
-omega <- sd_y_c / 2
-sigma <- 2 * sd_y_c
-(s_r <- gamma_a_b_from_omega_sigma(mode = omega, sd = sigma))
-
-stanvars <- 
-  brms::stanvar(mean_y_c,    name = "mean_y_c") + 
-  brms::stanvar(sd_y_c,      name = "sd_y_c") +
-  brms::stanvar(s_r$shape, name = "alpha") +
-  brms::stanvar(s_r$rate,  name = "beta")
-
-m1 = brms::brm(
-  formula = pct_diff_c ~ 1 + (1|f)
-  , data = dta
-  , iter = 2000, warmup = 1000, chains = 4, cores = max(lasR::ncores()-2, lasR::half_cores())
-  , prior = c(
-    brms::prior(normal(mean_y_c, sd_y_c * 5), class = Intercept)
-    , brms::prior(gamma(alpha, beta), class = sd)
-    , brms::prior(cauchy(0, sd_y_c), class = sigma)
-  )
-  , stanvars = stanvars
-  , file = "c:/data/usfs/point_cloud_tree_detection_ex/data/03_delivery/brms_m1"
-)
-# chains
-plot(m1)
-# plot dist
-dta %>%
-  dplyr::distinct(f) %>% 
-  tidybayes::add_epred_draws(m1) %>%
-  # transform b/c used centered/standardized y var
-  dplyr::mutate(
-    y_hat = (.epred*sd_y) + mean_y
-    , f = f %>% forcats::fct_rev()
-  ) %>% 
-  dplyr::ungroup() %>% 
-  ggplot(aes(x = y_hat, y = f)) +
-    geom_vline(xintercept = 0, linetype = "dashed") +
-    tidybayes::stat_dotsinterval(point_interval = "median_hdi", quantiles = 100) + 
-    scale_x_continuous(limits = c(-0.001,0.001), labels = scales::percent_format(accuracy = 0.01)) +
-    labs(y = "", x = "% difference from 400 pts.m2") +
-    theme_light()
-  
-# hdi
-dta %>%
-  dplyr::distinct(f) %>% 
-  tidybayes::add_epred_draws(m1) %>%
-  # transform b/c used centered/standardized y var
-  dplyr::mutate(
-    y_hat = (.epred*sd_y) + mean_y
-    , lt_pct = ifelse(abs(y_hat)<0.05,1,0)
-  ) %>% 
-  tidybayes::median_hdi(y_hat, .width = c(0.5,0.9,0.95,0.99)) %>% 
-  dplyr::mutate(
-    dplyr::across(.cols = c(y_hat,.upper,.lower), .fns = ~ scales::percent(.x,accuracy = 0.001))
-  ) %>% 
-  dplyr::arrange(f,.width) %>% 
-  kableExtra::kbl() %>% 
-  kableExtra::kable_styling()
-
-# comparisons
-dta %>%
-  dplyr::distinct(f) %>% 
-  tidybayes::add_epred_draws(m1) %>%
-  dplyr::ungroup() %>% 
-  # transform b/c used centered/standardized y var
-  dplyr::mutate(
-    y_hat = (.epred*sd_y) + mean_y
-  ) %>% 
-  tidybayes::compare_levels(variable = y_hat, by = f, comparison = "pairwise") %>% 
-  dplyr::ungroup() %>% 
-  dplyr::mutate(
-    f = f %>% 
-      factor() %>% 
-      forcats::fct_reorder(stringr::word(f) %>% as.numeric())
-  ) %>% 
-  ggplot(
-      aes(
-        x = y_hat, y = f
-        , fill = after_stat(abs(x) < .0005)
-      )
-    ) +
-    geom_vline(xintercept = 0, linetype = "dashed") +
-    tidybayes::stat_halfeye(point_interval = "median_hdi") + 
-    # tidybayes::stat_dotsinterval(quantiles = 100) + 
-    labs(
-      fill = paste0("diff. <", scales::percent(.0005, accuracy = 0.01))
-      , y = "", x = "difference"
-    ) +
-    scale_x_continuous(labels = scales::percent_format(accuracy = 0.01)) +
-    scale_fill_manual(values = c("gray", "steelblue")) +
-    theme_light()
-
-
-# # m2 with continuous pts???
-# m2 = brms::brm(
+# ###########################################################################################################################
+# ###########################################################################################################################
+# ###########################################################################################################################
+# ###########################################################################################################################
+# ###########################################################################################################################
+# ###########################################################################################################################
+# # testing differences in filtering for triangulation with high density point clds
+# # ran kaibab_low, high_aggressive.las with different filtering for the number of points used for triangulation
+#   # 400 pts/m2
+#   # filter1 = 100% of points used (400 pts/m2)
+#   # filter0.75 = 75% of points used (300 pts/m2)
+#   # ....
+#   # filter0.05 = 5% of points used (20 pts/m2)
+#   
+#   ### this is sloppy code but will suffice
+# library(tidyverse)
+# library(terra)
+# library(brms)
+# library(tidybayes)
+#   
+# r1 = terra::rast("c:/data/usfs/point_cloud_tree_detection_ex/data/03_delivery/filter1_chm_0.25m.tif")
+# r2 = terra::rast("c:/data/usfs/point_cloud_tree_detection_ex/data/03_delivery/filter0.75_chm_0.25m.tif")
+# r3 = terra::rast("c:/data/usfs/point_cloud_tree_detection_ex/data/03_delivery/filter0.5_chm_0.25m.tif")
+# r4 = terra::rast("c:/data/usfs/point_cloud_tree_detection_ex/data/03_delivery/filter0.25_chm_0.25m.tif")
+# r5 = terra::rast("c:/data/usfs/point_cloud_tree_detection_ex/data/03_delivery/filter0.19_chm_0.25m.tif")
+# r6 = terra::rast("c:/data/usfs/point_cloud_tree_detection_ex/data/03_delivery/filter0.13_chm_0.25m.tif")
+# r7 = terra::rast("c:/data/usfs/point_cloud_tree_detection_ex/data/03_delivery/filter0.05_chm_0.25m.tif")
+# 
+# plot((r2-r1)/r1)
+# 
+# l1 = as.matrix((r2-r1)/r1) %>% c()
+# l1 = l1[!is.na(l1)]
+# l2 = as.matrix((r3-r1)/r1) %>% c()
+# l2 = l2[!is.na(l2)]
+# l3 = as.matrix((r4-r1)/r1) %>% c()
+# l3 = l3[!is.na(l3)]
+# l4 = as.matrix((r5-r1)/r1) %>% c()
+# l4 = l4[!is.na(l4)]
+# l5 = as.matrix((r6-r1)/r1) %>% c()
+# l5 = l5[!is.na(l5)]
+# l6 = as.matrix((r7-r1)/r1) %>% c()
+# l6 = l6[!is.na(l6)]
+# 
+# dta = dplyr::bind_rows(
+#     dplyr::tibble(
+#       f = rep("300 pts.m2", length(l1))  
+#       , pct_diff = l1
+#     )
+#     , dplyr::tibble(
+#       f = rep("200 pts.m2", length(l2))  
+#       , pct_diff = l2
+#     )
+#     , dplyr::tibble(
+#       f = rep("100 pts.m2", length(l3))  
+#       , pct_diff = l3
+#     )
+#     , dplyr::tibble(
+#       f = rep("75 pts.m2", length(l4))  
+#       , pct_diff = l4
+#     )
+#     , dplyr::tibble(
+#       f = rep("50 pts.m2", length(l5))  
+#       , pct_diff = l5
+#     )
+#     , dplyr::tibble(
+#       f = rep("20 pts.m2", length(l6))  
+#       , pct_diff = l6
+#     )
+#   ) %>% 
+#   dplyr::mutate(
+#     f = factor(
+#       f
+#       , ordered = T
+#       , levels = c(
+#         "300 pts.m2"
+#         , "200 pts.m2"
+#         , "100 pts.m2"
+#         , "75 pts.m2"
+#         , "50 pts.m2"
+#         , "20 pts.m2"
+#       )
+#     )
+#   )
+# 
+# dta %>% dplyr::count(f)
+# dta %>% dplyr::slice_sample(prop = 0.5) %>% ggplot(aes(x = f, y = pct_diff)) + geom_boxplot()
+# 
+# # center
+# mean_y = mean(dta$pct_diff)
+# sd_y = sd(dta$pct_diff)
+# dta$pct_diff_c = (dta$pct_diff-mean_y)/sd_y
+# summary(dta$pct_diff_c)
+# 
+# # stanvars
+# gamma_a_b_from_omega_sigma = function(mode, sd) {
+#   if (mode <= 0) stop("mode must be > 0")
+#   if (sd   <= 0) stop("sd must be > 0")
+#   rate = (mode + sqrt(mode^2 + 4 * sd^2)) / (2 * sd^2)
+#   shape = 1 + mode * rate
+#   return(list(shape = shape, rate = rate))
+# }
+# 
+# mean_y_c = mean(dta$pct_diff_c)
+# sd_y_c = sd(dta$pct_diff_c)
+# omega = sd_y_c / 2
+# sigma = 2 * sd_y_c
+# (s_r = gamma_a_b_from_omega_sigma(mode = omega, sd = sigma))
+# 
+# stanvars = 
+#   brms::stanvar(mean_y_c,    name = "mean_y_c") + 
+#   brms::stanvar(sd_y_c,      name = "sd_y_c") +
+#   brms::stanvar(s_r$shape, name = "alpha") +
+#   brms::stanvar(s_r$rate,  name = "beta")
+# 
+# m1 = brms::brm(
 #   formula = pct_diff_c ~ 1 + (1|f)
 #   , data = dta
-#   , iter = 2000, warmup = 1000, chains = 4
+#   , iter = 2000, warmup = 1000, chains = 4, cores = max(lasR::ncores()-2, lasR::half_cores())
 #   , prior = c(
 #     brms::prior(normal(mean_y_c, sd_y_c * 5), class = Intercept)
 #     , brms::prior(gamma(alpha, beta), class = sd)
 #     , brms::prior(cauchy(0, sd_y_c), class = sigma)
 #   )
 #   , stanvars = stanvars
-#   , file = "c:/data/usfs/point_cloud_tree_detection_ex/data/03_delivery/brmsm1"
+#   , file = "c:/data/usfs/point_cloud_tree_detection_ex/data/03_delivery/brms_m1"
 # )
+# # chains
+# plot(m1)
+# # plot dist
+# dta %>%
+#   dplyr::distinct(f) %>% 
+#   tidybayes::add_epred_draws(m1) %>%
+#   # transform b/c used centered/standardized y var
+#   dplyr::mutate(
+#     y_hat = (.epred*sd_y) + mean_y
+#     , f = f %>% forcats::fct_rev()
+#   ) %>% 
+#   dplyr::ungroup() %>% 
+#   ggplot(aes(x = y_hat, y = f)) +
+#     geom_vline(xintercept = 0, linetype = "dashed") +
+#     tidybayes::stat_dotsinterval(point_interval = "median_hdi", quantiles = 100) + 
+#     scale_x_continuous(limits = c(-0.001,0.001), labels = scales::percent_format(accuracy = 0.01)) +
+#     labs(y = "", x = "% difference from 400 pts.m2") +
+#     theme_light()
+#   
+# # hdi
+# dta %>%
+#   dplyr::distinct(f) %>% 
+#   tidybayes::add_epred_draws(m1) %>%
+#   # transform b/c used centered/standardized y var
+#   dplyr::mutate(
+#     y_hat = (.epred*sd_y) + mean_y
+#     , lt_pct = ifelse(abs(y_hat)<0.05,1,0)
+#   ) %>% 
+#   tidybayes::median_hdi(y_hat, .width = c(0.5,0.9,0.95,0.99)) %>% 
+#   dplyr::mutate(
+#     dplyr::across(.cols = c(y_hat,.upper,.lower), .fns = ~ scales::percent(.x,accuracy = 0.001))
+#   ) %>% 
+#   dplyr::arrange(f,.width) %>% 
+#   kableExtra::kbl() %>% 
+#   kableExtra::kable_styling()
+# 
+# # comparisons
+# dta %>%
+#   dplyr::distinct(f) %>% 
+#   tidybayes::add_epred_draws(m1) %>%
+#   dplyr::ungroup() %>% 
+#   # transform b/c used centered/standardized y var
+#   dplyr::mutate(
+#     y_hat = (.epred*sd_y) + mean_y
+#   ) %>% 
+#   tidybayes::compare_levels(variable = y_hat, by = f, comparison = "pairwise") %>% 
+#   dplyr::ungroup() %>% 
+#   dplyr::mutate(
+#     f = f %>% 
+#       factor() %>% 
+#       forcats::fct_reorder(stringr::word(f) %>% as.numeric())
+#   ) %>% 
+#   ggplot(
+#       aes(
+#         x = y_hat, y = f
+#         , fill = after_stat(abs(x) < .0005)
+#       )
+#     ) +
+#     geom_vline(xintercept = 0, linetype = "dashed") +
+#     tidybayes::stat_halfeye(point_interval = "median_hdi") + 
+#     # tidybayes::stat_dotsinterval(quantiles = 100) + 
+#     labs(
+#       fill = paste0("diff. <", scales::percent(.0005, accuracy = 0.01))
+#       , y = "", x = "difference"
+#     ) +
+#     scale_x_continuous(labels = scales::percent_format(accuracy = 0.01)) +
+#     scale_fill_manual(values = c("gray", "steelblue")) +
+#     theme_light()
+# 
+# 
+# # # m2 with continuous pts???
+# # m2 = brms::brm(
+# #   formula = pct_diff_c ~ 1 + (1|f)
+# #   , data = dta
+# #   , iter = 2000, warmup = 1000, chains = 4
+# #   , prior = c(
+# #     brms::prior(normal(mean_y_c, sd_y_c * 5), class = Intercept)
+# #     , brms::prior(gamma(alpha, beta), class = sd)
+# #     , brms::prior(cauchy(0, sd_y_c), class = sigma)
+# #   )
+# #   , stanvars = stanvars
+# #   , file = "c:/data/usfs/point_cloud_tree_detection_ex/data/03_delivery/brmsm1"
+# # )
+
+library(brms)
+library(tidyverse)
+library(tidybayes)
+m = readRDS("c:/data/usfs/point_cloud_tree_detection_ex/data/point_cloud_processing_delivery/regional_dbh_height_model.rds")
+m
+plot(m)
