@@ -8,6 +8,143 @@
 
 ########## !!!!!!!!!!!!!!!!! run point_cloud_processing.r to line 328...thru: 
 
+library(tidyverse)
+library(sf)
+library(terra)
+library(lidR)
+library(lasR)
+las_ctg = lidR::readLAScatalog(
+  "c:/data/usfs/point_cloud_tree_detection_ex/data/testtest/"
+  # "c:/data/usfs/point_cloud_tree_detection_ex/data/lower_sherwin/"
+)
+plot(las_ctg, mapview = TRUE) #, map.type = "Esri.WorldImagery")
+lidR::las_check(las_ctg)
+las_ctg@data$CRS
+las_ctg
+# reproject
+las = lidR::readLAS(las_ctg@data$filename[1]) # read individual file
+
+las_ctg@data %>% dplyr::filter(dplyr::row_number()==1) %>% 
+  sf::st_centroid() %>% 
+  sf::st_buffer(20) %>%  
+  ggplot() +
+    geom_sf(fill = "black") +
+    geom_sf(data = las_ctg@data %>% dplyr::filter(dplyr::row_number()==1), fill = NA)
+  
+
+las$Classification %>% table()
+
+# las %>% 
+#   lidR::clip_roi(las_ctg@data %>% dplyr::filter(dplyr::row_number()==1) %>% 
+#   sf::st_centroid() %>% 
+#   sf::st_buffer(100)) %>% 
+#   plot(color = "Classification")
+
+w = lasR::write_las(ofile = "c:/data/usfs/point_cloud_tree_detection_ex/data/testtest/usgs_cp.las")
+tri = lasR::triangulate(filter = lasR::keep_ground())
+dtm = lasR::rasterize(res = 1, operators = tri)
+norm = lasR::transform_with(stage = tri)
+chm = lasR::rasterize(res = 1, filter = "-keep_z_above 4")
+pit = lasR::pit_fill(raster = chm)
+ans = lasR::exec(
+  # w + tri + dtm + norm + chm + pit
+  tri + dtm + norm + chm + pit
+  , on = las
+    # las %>% 
+    # lidR::clip_roi(las_ctg@data %>% dplyr::filter(dplyr::row_number()==1) %>% 
+    # sf::st_centroid() %>% 
+    # sf::st_buffer(1000))
+)
+ans
+ans[[1]] %>% plot()
+ans[[2]] %>% plot()
+ans[[2]] %>% 
+  terra::focal(
+    w = 3
+    , fun = "mean"
+    , na.rm = T
+    # na.policy Must be one of:
+      # "all" (compute for all cells)
+      # , "only" (only for cells that are NA)
+      # , or "omit" (skip cells that are NA).
+    , na.policy = "only"
+  ) %>% plot()
+ans[[4]] %>% plot()
+
+mapview::mapviewOptions(basemaps = "Esri.WorldImagery")
+ans[[2]] %>% 
+  terra::focal(
+    w = 3
+    , fun = "mean"
+    , na.rm = T
+    # na.policy Must be one of:
+      # "all" (compute for all cells)
+      # , "only" (only for cells that are NA)
+      # , or "omit" (skip cells that are NA).
+    , na.policy = "only"
+  ) %>% 
+  stars::st_as_stars() %>% 
+  sf::st_set_crs(paste0("EPSG:", 6430)) %>% 
+  mapview::mapview(na.color = "transparent", alpha.regions = 0.7)
+
+
+sf::st_crs(las)$epsg
+# sf::st_crs(las) = paste0("EPSG:", 6430)
+sf::st_crs(las)$epsg
+
+is.null(sf::st_crs(las))
+plot(las, mapview = TRUE) #, map.type = "Esri.WorldImagery")
+las_new = sf::st_transform(las, paste0("EPSG:", "4326")) # this is the only transform for "6430" https://epsg.io/6430
+las_new = sf::st_transform(las, paste0("EPSG:", "26913"))
+# las_new = sf::st_transform(las, crs = "26913")
+sf::st_crs(las_new)
+plot(las_new, mapview = TRUE) #, map.type = "Esri.WorldImagery")
+# 
+# function to reproject
+# see : https://gis.stackexchange.com/questions/371566/can-i-re-project-an-las-file-in-lidr
+reproject_las_fn <- function(filepath, new_crs = NULL, old_crs = NULL, outdir = getwd()) {
+  if(is.null(new_crs)){stop("the new_crs must be provided")}
+  # read individual file
+  las = lidR::readLAS(filepath)
+  if(
+    (is.null(sf::st_crs(las)) | is.na(sf::st_crs(las)))
+    & is.null(old_crs)
+  ){
+    stop("the raw las file has missing CRS and cannot be transformed. try setting old_crs if known")
+  }else{
+    # transform if know old crs
+    if(
+      is.null(sf::st_crs(las)$epsg) | is.na(sf::st_crs(las)$epsg)
+      & !is.null(old_crs)
+    ){
+      sf::st_crs(las) = paste0("EPSG:", old_crs)
+    }
+    # get filename
+    fnm = filepath %>% basename() %>% stringr::str_remove_all("\\.(laz|las)$")
+    new_fnm = paste0(normalizePath(outdir),"/",fnm,"_epsg",new_crs,".las")
+    # reproject
+    las = sf::st_transform(las, paste0("EPSG:", new_crs))
+    # write
+    lidR::writeLAS(las, file = new_fnm)
+    return(new_fnm)
+  }
+}
+# map over files
+new_flist_temp = las_ctg@data$filename %>%
+  purrr::map(
+    reproject_las_fn
+    , new_crs = "26913"
+    , old_crs = "6430"
+    , outdir = "c:/data/usfs/point_cloud_tree_detection_ex/data/testtest"
+  ) %>%
+  c() %>%
+  unlist()
+
+new_flist_temp %>% unlist()
+las = lidR::readLAS(new_flist_temp[1])
+
+
+
 library(future)
 
 # remove all files in delivery and temp
@@ -1253,9 +1390,48 @@ chm_rast %>%
 # #   , file = "c:/data/usfs/point_cloud_tree_detection_ex/data/03_delivery/brmsm1"
 # # )
 
-library(brms)
-library(tidyverse)
-library(tidybayes)
-m = readRDS("c:/data/usfs/point_cloud_tree_detection_ex/data/point_cloud_processing_delivery/regional_dbh_height_model.rds")
-m
-plot(m)
+##########################################################################################
+##########################################################################################
+##########################################################################################
+##########################################################################################
+# # group rows based on cumsum with reset
+# cumsum_group <- function(x, threshold) {
+#   cumsum <- 0
+#   group <- 1
+#   result <- numeric()
+#   
+#   for (i in 1:length(x)) {
+#     cumsum <- cumsum + x[i]
+#     
+#     if (cumsum > threshold) {
+#       group <- group + 1
+#       cumsum <- x[i]
+#     }
+#     
+#     result = c(result, group)
+#     
+#   }
+#   
+#   return (result)
+# }
+# 
+# # cumsum with reset
+# cumsum_with_reset <- function(x, threshold) {
+#   cumsum <- 0
+#   group <- 1
+#   result <- numeric()
+#   
+#   for (i in 1:length(x)) {
+#     cumsum <- cumsum + x[i]
+#     
+#     if (cumsum > threshold) {
+#       group <- group + 1
+#       cumsum <- x[i]
+#     }
+#     
+#     result = c(result, cumsum)
+#     
+#   }
+#   
+#   return (result)
+# }
