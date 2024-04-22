@@ -65,7 +65,7 @@
   # accuracy_level = 1 # uses DTM to height normalize the points
   # accuracy_level = 2 # uses triangulation with high point density (20 pts/m2) to height normalize the points
   # accuracy_level = 3 # uses triangulation with very high point density (100 pts/m2) to height normalize the points
-  accuracy_level = 1
+  accuracy_level = 2
 
   ###____________________###
   ### this process writes intermediate data to the disk
@@ -979,12 +979,46 @@
             ncores = max(lasR::ncores()-1, lasR::half_cores())
           )
       )
+    
+    # create safe function to capture error and map over
+      safe_lasr_pipeline_fn = purrr::safely(lasr_pipeline_fn)
+      
     # map over processing grids
       lasr_ans_list = 
         process_data$processing_grid %>%
         unique() %>%
-        purrr::map(lasr_pipeline_fn) 
+        purrr::map(safe_lasr_pipeline_fn) 
         
+    # check for errors other than too few points for triangulation which happens on edge chunks with few points and also those with copious noise
+      error_list_temp = 
+        lasr_ans_list %>% 
+        purrr::transpose() %>% 
+        purrr::pluck("error") %>% 
+        unlist() %>% 
+        purrr::pluck("message")
+      
+      if(length(error_list_temp)>0){
+        has_errors_temp = error_list_temp %>% 
+          dplyr::tibble() %>%
+          dplyr::rename(message=1) %>% 
+          dplyr::mutate(
+            is_tri_error = dplyr::case_when(
+              stringr::str_detect(tolower(message), "triangulation") & 
+                stringr::str_detect(tolower(message), "0 points") ~ 1
+              , T ~ 0
+            )
+            , sum_is_tri_error = sum(is_tri_error)
+            , pct_tri = sum_is_tri_error/length(unique(process_data$processing_grid))
+            , keep_it = dplyr::case_when(
+              is_tri_error==1 & pct_tri<0.5 ~ F
+              , T ~ T
+            )
+          ) %>% 
+          dplyr::filter(keep_it==T)
+      }else{has_errors_temp = dplyr::tibble()}
+      
+    if(nrow(has_errors_temp)>0){stop("lasR processing failed due to:\n", has_errors_temp$message[1])}
+    
     # clean up
       remove(list = ls()[grep("_temp",ls())])
       gc()
@@ -1516,7 +1550,7 @@
   ###___________________________________________________###
     ### ITD on CHM
     # call the locate_trees function and pass the variable window
-    ###############################################################################
+  ###############################################################################
   # make and process tiles if not in memory
   ###############################################################################
     # # !!!!!! lidR::locate_trees didn't work with large rasters, given error:
@@ -1529,7 +1563,7 @@
         raster = raster*1 
         # check if is not in memory = raster_is_proxy
         raster_is_proxy = !terra::inMemory(raster)
-        # check if memory is availalbe = raster_fits_in_memory
+        # check if memory is available = raster_fits_in_memory
         if(raster_is_proxy){
           # check memory needed
           nc = terra::nrow(raster)*terra::ncol(raster)
