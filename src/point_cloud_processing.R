@@ -1003,8 +1003,8 @@
           dplyr::rename(message=1) %>% 
           dplyr::mutate(
             is_tri_error = dplyr::case_when(
-              stringr::str_detect(tolower(message), "triangulation") & 
-                stringr::str_detect(tolower(message), "0 points") ~ 1
+              stringr::str_detect(tolower(message), "impossible") & 
+                stringr::str_detect(tolower(message), "triangulation") ~ 1
               , T ~ 0
             )
             , sum_is_tri_error = sum(is_tri_error)
