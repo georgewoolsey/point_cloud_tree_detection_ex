@@ -1079,20 +1079,20 @@
       rast_list_temp = list.files(config$chm_dir, pattern = ".*\\.(tif|tiff)$", full.names = T) %>% purrr::map(function(x){terra::rast(x)})
       # mosaic
       chm_rast = terra::sprc(rast_list_temp) %>% terra::mosaic(fun = "max")
+      # set crs
+      terra::crs(chm_rast) = proj_crs
       # fill empty cells
         # this helps to smooth out tile gaps which leads to too many trees being detected during itd
         chm_rast = chm_rast %>%
           terra::crop(
             las_ctg@data$geometry %>%
               sf::st_union() %>%
-              terra::vect() %>%
-              terra::project(terra::crs(chm_rast))
+              terra::vect()
           ) %>%
           terra::mask(
             las_ctg@data$geometry %>%
               sf::st_union() %>%
-              terra::vect() %>%
-              terra::project(terra::crs(chm_rast))
+              terra::vect()
           ) %>%
           terra::focal(
             w = 3
@@ -1106,8 +1106,7 @@
           )
         # chm_rast %>% terra::crs()
         # chm_rast %>% terra::plot()
-      # set crs
-        terra::crs(chm_rast) = proj_crs
+      
       # write to delivery directory
         terra::writeRaster(
           chm_rast
