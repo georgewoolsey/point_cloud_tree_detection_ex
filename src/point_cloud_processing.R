@@ -2003,8 +2003,7 @@
         sf::st_intersection(
           las_ctg@data$geometry %>% 
             sf::st_union() %>% 
-            sf::st_as_sf() %>% 
-            sf::st_transform(sf::st_crs(tree_tops))
+            sf::st_as_sf()
         ) %>% 
         # calculate area of buffer within study
         dplyr::mutate(
@@ -2212,6 +2211,15 @@
     ###__________________________________________________###
     ### read in FIA data ###
     ###__________________________________________________###
+    # can't make regional model if crs is blank
+    if(tolower(proj_crs)=="epsg:na"){
+      stop(paste0(
+        "Cannot make regional DBH-Height model with blank CRS. Set `user_supplied_epsg` parameter if known."
+        , "\nSee outputs in:\n"
+        , config$delivery_dir
+      ))
+    }
+    
     # read in treemap data
     # downloaded from: https://www.fs.usda.gov/rds/archive/Catalog/RDS-2021-0074
     # read in treemap (no memory is taken)
