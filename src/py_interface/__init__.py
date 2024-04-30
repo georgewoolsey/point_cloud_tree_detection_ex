@@ -1,2 +1,2 @@
-from .utils.parse_user_input import main as parse_user_input
+from .utils import set_env
 

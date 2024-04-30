@@ -24,7 +24,7 @@ def create_parser(subparsers=None):
     return parser
 
 
-def cmd_line_parse(args=None):
+def cmd_line_parse(args: str = None):
     parser = create_parser()
     inps = parser.parse_args(args=args)
     if inps.path:
@@ -33,7 +33,8 @@ def cmd_line_parse(args=None):
         print('Path {} is not exist'.format(inps.path))
     return inps
 
-def type_rules(arg):
+
+def type_convert(arg: str) -> (float, str, int, bool):
     arg = arg.strip()
     if arg.isdigit():
         return int(arg)
@@ -53,20 +54,22 @@ def type_rules(arg):
         return float(arg)
     return arg
 
-def parse_config(path):
-    param_dict = {}
+
+def parse_config(path) -> dict:
+    config = {}
     with open(path, 'r') as file:
         lines = [line.strip() for line in file if not line.startswith(("#", " "))]
-    param_list = [param for param in lines if param != '']  #remove all empty strs
+    # remove all empty strs
+    param_list = [param for param in lines if param != '']
     for p in param_list:
         key, value = p.split("=", 1)
         key = key.strip()
-        value = type_rules(value)
-        param_dict[key] = value
-    return param_dict
+        value = type_convert(value)
+        config[key] = value
+    return config
 
 
-def main(args=None) -> dict:
+def main(args:(str, pathlib.PurePath) = None) -> dict:
     """
     CLI usage: python parse_user_input.py -p <CONFIG path>
     To import use: from py_interface import parse_user_input
@@ -74,7 +77,7 @@ def main(args=None) -> dict:
     :return: dict
     """
     default_config_path = Path(__file__).parents[1].joinpath('defaults/CONFIG')
-    if isinstance(args, (str, pathlib.Path)):
+    if isinstance(args, (str, pathlib.PurePath)):
         path = Path(args)
     else:
         inps = cmd_line_parse(args)
@@ -86,8 +89,8 @@ def main(args=None) -> dict:
     else:
         shutil.copyfile(default_config_path, path)
         print('Generating config file under {}'.format(path))
-    param_dict = parse_config(path)
-    return param_dict
+    config = parse_config(path)
+    return config
 
 
 if __name__ == '__main__':
