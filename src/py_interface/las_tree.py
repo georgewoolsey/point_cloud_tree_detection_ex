@@ -19,6 +19,7 @@ def create_parser():
     parser = argparse.ArgumentParser(
         name, description=synopsis)
     parser.add_argument("-p", "--path", help="Path to the CONFIG file")
+    parser.add_argument("--generate_config", metavar='PATH',help = "Copy default CONFIG file")
     parser.add_argument("-f","--force_overlap", help="To force remove all files for new program",
                         action="store_true")
     parser.add_argument("--example_data", help="To download example data",
@@ -27,12 +28,19 @@ def create_parser():
 
 
 def cmd_line_parse(iargs=None):
+    default_config_path = Path(__file__).parent.joinpath('defaults/CONFIG')
     parser = create_parser()
     inps = parser.parse_args(args=iargs)
     if inps.path:
         inps.path = Path(inps.path).resolve()
     if inps.force_overlap:
         print('All result will be purged')
+    if inps.generate_config:
+        user_given_path = Path(inps.generate_config).resolve()
+        if user_given_path.is_dir():
+            user_given_path = user_given_path.joinpath('CONFIG')
+        shutil.copyfile(default_config_path, user_given_path)
+        sys.exit(0)
     if inps.example_data:
         tools.download_example()
         sys.exit(0)
@@ -53,8 +61,7 @@ def main(iargs=None):
         config_path = path
         print('config_path:',config_path)
     else:
-        shutil.copyfile(default_config_path, path)
-        print('No config file found! Copying default config to {}'.format(path))
+        print('No config file found in {}!'.format(path))
         sys.exit(0)
     print('Setting environment...this will take a while...')
     set_env.load_r_packages()
