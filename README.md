@@ -17,6 +17,9 @@ sudo add-apt-repository -y ppa:apptainer/ppa
 sudo apt update
 sudo apt install -y apptainer
 
+#Download container image (use gdown)
+gdown https://drive.google.com/uc?id=1WWhHFDZQIiv2lr2rtfAXd-BCcJlUhrCc
+
 #clone this repository 
 git clone https://github.com/jldz9/point_cloud_tree_detection_ex.git
 cd point_cloud_tree_detection_ex
