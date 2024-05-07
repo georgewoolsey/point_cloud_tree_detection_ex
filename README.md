@@ -29,7 +29,7 @@ cd point_cloud_tree_detection_ex
 apptainer exec ./las_tree_container.sif ./las_tree.py --example_data
 
 #Init CONFIG file
-apptainer exec ./las_tree_container.sif ./las_tree.py -p
+apptainer exec ./las_tree_container.sif ./las_tree.py --generate_config
 
 #Run the point cloud tree detection
 apptainer exec ./las_tree_container.sif ./las_tree.py -p ./CONFIG
