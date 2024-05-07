@@ -54,18 +54,11 @@ def extract(zip_path, target_path):
 def download_example():
     print('Downloading example data, the size of data will be around 6GB')
     print('Downloading Treemap data')
-    url = 'https://s3-us-west-2.amazonaws.com/fs.usda.rds/RDS-2021-0074/RDS-2021-0074_Data.zip'
     treemap_file_dir = Path.cwd().parent.joinpath('data/treemap')
     treemap_file_dir.mkdir(parents=True, exist_ok=True)
     treemap_file = treemap_file_dir.joinpath('RDS-2021-0074_Data.zip')
-    if any(treemap_file_dir.iterdir()):
-        force_clean = input('The directory {} is not empty, do you want to purge it? (y/n)'.format(treemap_file_dir))
-        if force_clean.lower() == 'y':
-            shutil.rmtree(treemap_file_dir)
-        else:
-            print('Skip cleanning')
-    if treemap_file.exists():
-        print('Treemap data already exists')
+    if treemap_file.is_file():
+        print('Treemap data already exists in {}'.format(treemap_file))
     else:
         urllib.request.urlretrieve(url, treemap_file, reporthook=progress_reporthook)
     print('Unziping Treemap data')
@@ -77,14 +70,7 @@ def download_example():
     las_file_dir = Path.cwd().parent.joinpath('data/las_data')
     las_file_dir.mkdir(parents=True, exist_ok=True)
     las_file = las_file_dir.joinpath('las.zip')
-    if any(las_file_dir.iterdir()):
-        force_clean = input('The directory {} is not empty, do you want to purge it? (y/n)'.format(treemap_file_dir))
-        if force_clean.lower() == 'y':
-            shutil.rmtree(las_file_dir)
-        else:
-            print('Skip cleanning')
-
-    if las_file.exists():
+    if las_file.is_file():
         print("Example LAS data already exist in {}".format(las_file))
     else:
         print('Downloading LAS data')
