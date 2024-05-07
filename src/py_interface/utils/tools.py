@@ -88,9 +88,9 @@ def download_example():
         print("Example LAS data already exist in {}".format(las_file))
     else:
         print('Downloading LAS data')
-        url_las = ('https://drive.usercontent.google.com/download?id=1-k6Os9E59GcFyGT9WoY3V6hNX2SmQsMV&export='
-                    'download&authuser=0&confirm=t&uuid=cf8aa26d-3936-4fa5-a512-f6f19309df3b&at='
-                    'APZUnTXkAH669BbhRiNWjGpaHymS%3A1715036657732')
+        url_las = ('https://drive.usercontent.google.com/download?'
+                   'id=1-k6Os9E59GcFyGT9WoY3V6hNX2SmQsMV&export=download&confirm'
+                   '=t&uuid=c78e06ca-0c61-4ef8-b2ba-de1ab83c6812')
         urllib.request.urlretrieve(url_las, las_file, reporthook=progress_reporthook)
     print('Unziping LAS data')
     extract(las_file, las_file_dir)
