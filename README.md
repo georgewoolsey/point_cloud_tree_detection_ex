@@ -20,7 +20,7 @@ git clone https://github.com/jldz9/point_cloud_tree_detection_ex.git
 cd point_cloud_tree_detection_ex
 
 #downlod SIF container
-wget
+wget https://drive.usercontent.google.com/download?id=1WWhHFDZQIiv2lr2rtfAXd-BCcJlUhrCc&confirm=t&uuid=56606aaf-79fc-483d-ad11-a860775133c9
 
 #Get example data
 apptainer exec ./las_tree_container.sif ./las_tree.py --example_data
