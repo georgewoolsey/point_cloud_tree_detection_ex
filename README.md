@@ -18,6 +18,7 @@ sudo apt update
 sudo apt install -y apptainer
 
 #Download container image
+apptainer pull lastree.sif library://jldz9/lastree/image:1.0
 
 #Execute the lastree
 apptainer exec lastree.tif lastree -h
