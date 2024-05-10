@@ -118,4 +118,4 @@ def load_r_packages() -> SimpleNamespace:
 
 if __name__ == '__main__':
     rpaks = load_r_packages()
-    create_project_structure('/home/jldz9/point_cloud_tree_detection_ex/src/py_interface/defaults/CONFIG')
+    create_project_structure('/las_tree/defaults/CONFIG')

@@ -36,21 +36,21 @@ use_parallel_processing = T
 ###____________________###
 ### Set directory for outputs ###
 ###____________________###
-# output_dir = "../output"
-output_dir = "../output"
+# output_dir = "./output"
+output_dir = "./output"
   
 ###_________________________###
 ### Set input las directory ###
 ###_________________________###
 # !!!!!!!!!! ENSURE FILES ARE PROJECTED IN CRS THAT USES METRE AS MEASURMENT UNIT
-# input_las_dir = "../data/las_data"
-input_las_dir = "../data/las_data"
+# input_las_dir = "./data/las_data"
+input_las_dir = "./data/las_data"
   
 ###_________________________###
 ### Set input TreeMap directory ###
 ###_________________________###
-# input_treemap_dir = "../data/treemap"
-input_treemap_dir = "../data/treemap"
+# input_treemap_dir = "./data/treemap"
+input_treemap_dir = "./data/treemap"
   
 ###_________________________###
 ### Set the desired raster resolution in metres for the digital terrain model

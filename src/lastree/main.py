@@ -5,14 +5,15 @@ This script is the main CLI interface for the program
 """
 # Version 05.06.2024
 # Author: Jiawei Li
-from py_interface import r_script_2_py,set_env, tools
+from lastree import __version__
+from lastree import r_script_2_py, set_env, tools
 import argparse
 import sys
 from pathlib import Path
 import pathlib
 import shutil
-import subprocess
-import rpy2.robjects as ro
+
+
 def create_parser():
     synopsis = 'This is a python interface for point_cloud_tree_detection_ex program'
     name = __name__.split('.')[-1]
@@ -24,6 +25,7 @@ def create_parser():
                         action="store_true")
     parser.add_argument("--example_data", help="To download example data",
                         action="store_true")
+    parser.add_argument("-v", "--version", action='version', version='lastree {}'.format(__version__))
     return parser
 
 
@@ -40,6 +42,7 @@ def cmd_line_parse(iargs=None):
         if user_given_path.is_dir():
             user_given_path = user_given_path.joinpath('CONFIG')
         shutil.copyfile(default_config_path, user_given_path)
+        print('Default CONFIG file generated in {}'.format(user_given_path))
         sys.exit(0)
     if inps.example_data:
         tools.download_example()
@@ -47,7 +50,6 @@ def cmd_line_parse(iargs=None):
     return inps
 
 def main(iargs=None):
-    default_config_path = Path(__file__).parent.joinpath('defaults/CONFIG')
     inps = cmd_line_parse(iargs)
     if isinstance(inps.path, (str, pathlib.PurePath)):
         path = Path(inps.path).resolve()
@@ -119,8 +121,12 @@ def main(iargs=None):
     #Calculate Silviculture Metrics
     config = r_script_2_py.calculate_silviculture_metrics(config)
 
-if __name__ == "__main__":
+
+def main_cli():
     if len(sys.argv) == 1:
-        subprocess.run(['python','las_tree.py','-h'])
-    else:
-        main(sys.argv[1:])
+        sys.argv.append('-h')
+    main(sys.argv[1:])
+
+
+if __name__ == "__main__":
+    main_cli()
