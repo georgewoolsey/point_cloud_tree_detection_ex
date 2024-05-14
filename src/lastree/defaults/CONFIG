@@ -1,0 +1,134 @@
+#################################################################################
+#################################################################################
+# User-Defined Parameters
+#################################################################################
+#################################################################################
+###____________________###
+# choose processing accuracy
+# XXL las catalogs (e.g. >70,000,000 pts) take a long time to process at accuracy_level = 3
+# from the lidR book https://r-lidar.github.io/lidRbook/norm.html:
+## "Point cloud normalization without a DTM interpolates the elevation of 
+## every single point locations using ground points. It no longer uses elevations 
+## at discrete predefined locations (i.e. DTM). Thus the methods is exact, computationally speaking. 
+## It means that it is equivalent to using a continuous DTM but it is important 
+## to recall that all interpolation methods are interpolation and by definition 
+## make guesses with different strategies. Thus by "exact" we mean "continuous"
+###____________________###
+# accuracy_level = 1 # uses DTM to height normalize the points
+# accuracy_level = 2 # uses triangulation with high point density (20 pts/m2) to height normalize the points
+# accuracy_level = 3 # uses triangulation with very high point density (100 pts/m2) to height normalize the points
+accuracy_level = 2
+
+###____________________###
+### this process writes intermediate data to the disk
+### keep those intermediate files (classfied, normalized, stem las files)?
+###____________________###
+# keep_intermediate_files = F
+keep_intermediate_files = F
+  
+###____________________###
+### use parallel processing? (T/F) ###
+### parallel processing may not work on all machines ###
+###____________________###
+# use_parallel_processing = F
+use_parallel_processing = T
+  
+###____________________###
+### Set directory for outputs ###
+###____________________###
+# output_dir = "./output"
+output_dir = "./output"
+  
+###_________________________###
+### Set input las directory ###
+###_________________________###
+# !!!!!!!!!! ENSURE FILES ARE PROJECTED IN CRS THAT USES METRE AS MEASURMENT UNIT
+# input_las_dir = "./data/las_data"
+input_las_dir = "./data/las_data"
+  
+###_________________________###
+### Set input TreeMap directory ###
+###_________________________###
+# input_treemap_dir = "./data/treemap"
+input_treemap_dir = "./data/treemap"
+  
+###_________________________###
+### Set the desired raster resolution in metres for the digital terrain model
+###_________________________###
+# desired_dtm_res = 1
+desired_dtm_res = 1
+  
+###_________________________###
+### Set the desired raster resolution in metres for the canopy height model
+###_________________________###
+# desired_chm_res = 0.25
+desired_chm_res = 0.25
+  
+###_________________________###
+### Set the maximum height (m) for the canopy height model
+###_________________________###
+# max_height_threshold_m = 60
+max_height_threshold_m = 60
+  
+###_________________________###
+### Set the minimum height (m) for individual tree detection in `lidR::locate_trees`
+###_________________________###
+# minimum_tree_height_m = 1.37
+minimum_tree_height_m = 2
+  
+###_________________________###
+### Set the maximum dbh size (meters)
+###_________________________###
+# dbh_max_size_m = 10
+dbh_max_size_m = 7
+  
+###_________________________###
+### Set the model to use for local dbh-height allometry
+### can be "rf" for random forest or "lin" for linear 
+###_________________________###
+# local_dbh_model = "rf"
+# local_dbh_model = "lin"
+local_dbh_model = "rf"
+  
+###_________________________###
+### Default epsg to use if your las has a blank projection
+### this should be the epsg (CRS) that the las was exported with (e.g. from Metashape)
+### see: https://epsg.io/
+### leave as NA if unsure
+###_________________________###
+# user_supplied_epsg = "6345"
+user_supplied_epsg = NA
+  
+### do you want to reproject to this crs if the file currently has one set?
+### be careful! this is ineffiecient and potentially causes inaccuracies due to transformations
+### see : https://gis.stackexchange.com/questions/371566/can-i-re-project-an-las-file-in-lidr
+### leave as FALSE if unsure
+# transform_to_this_epsg = F
+transform_to_this_epsg = F
+# if you want to transform by setting transform_to_this_epsg = T
+# ...and your las files do not have an epsg set, then you must supply the old epsg if known
+# ... if unsure leave as NA
+user_supplied_old_epsg = NA
+#################################################################################
+#################################################################################
+# Developer Parameters
+# ...these parameters control the automatic "chunking" of data and script flows
+# ...should only need to be adjusted if running into "R Session Aborted" errors 
+# ...which is largely due to memory full issues
+#################################################################################
+#################################################################################
+######################################
+# chunk for large area/pt pt clouds
+# adpative retiling w/ minimal (no?) user input
+# set maximums based on sample data testing
+######################################
+# for super big ctgs...lots of different stuff needs to happen to reduce memory issues max points to process in any ctg using lasR at one time
+max_ctg_pts = 70e6 
+# this one is less important as never experienced memory issues with large areas (just lots of pts) # original = 90e3
+max_area_m2 = 90e3 
+  
+#### This maximum filters the ground points to perform Delaunay triangulation
+# see: https://github.com/r-lidar/lasR/issues/18#issuecomment-2027818414
+max_pts_m2 = dplyr::case_when(as.numeric(accuracy_level) <= 2 ~ 20, as.numeric(accuracy_level) == 3 ~ 100, T ~ 20)
+## at 100 pts/m2, the resulting CHM pixel values (0.25m resolution) are within -0.009% and 0.026% metres
+# ... of the values obtained by using 400 pts/m2 with 99% probability
