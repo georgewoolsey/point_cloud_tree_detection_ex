@@ -17,6 +17,8 @@ sudo apt update
 sudo apt install -y apptainer
 
 #Download container image
+apptainer remote add --no-login SylabsCloud cloud.sycloud.io
+apptainer remote use SylabsCloud
 apptainer pull lastree.sif library://jldz9/lastree/image:1.0
 
 #Execute the lastree
