@@ -129,11 +129,12 @@ las_ctg_dta = sf::st_read(paste0(delivery_dir, "/raw_las_ctg_info.gpkg"))
 ##################################################################################
   # aggregate raster and map
   chm_rast %>%
-    terra::aggregate(fact=4) %>% 
+    terra::aggregate(fact=3, cores = 4) %>% 
     stars::st_as_stars() %>% 
     mapview::mapview(
       layer.name = "canopy ht.(m)"
       , alpha.regions = 0.7
+      , na.color = "transparent"
     )
 ##################################################################################
 ##################################################################################

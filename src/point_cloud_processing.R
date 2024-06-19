@@ -79,7 +79,7 @@
   ### parallel processing may not work on all machines ###
   ###____________________###
   # use_parallel_processing = F
-  use_parallel_processing = T
+  use_parallel_processing = F
   
   ###____________________###
   ### Set directory for outputs ###
@@ -136,7 +136,7 @@
   ###_________________________###
   # local_dbh_model = "rf"
   # local_dbh_model = "lin"
-  local_dbh_model = "rf"
+  local_dbh_model = "lin"
   
   ###_________________________###
   ### Default epsg to use if your las has a blank projection
@@ -144,7 +144,7 @@
   ### see: https://epsg.io/
   ### leave as NA if unsure
   ###_________________________###
-  # user_supplied_epsg = "6345"
+  # user_supplied_epsg = "6350"
   user_supplied_epsg = NA
   
   ### do you want to reproject to this crs if the file currently has one set?
@@ -847,6 +847,7 @@
      , chm_res = desired_chm_res
      , min_height_m = minimum_tree_height_m
      , max_height_m = max_height_threshold_m
+     , lap_sz = 3
     ){
       # chm
         #set up chm pipeline step
@@ -865,7 +866,9 @@
           # , ofile = paste0(config$chm_dir, "/*_chm.tif")
         )
       # Pits and spikes filling for raster with algorithm from St-Onge 2008 (see reference).
-        lasr_chm_pitfill = lasR::pit_fill(raster = lasr_chm, ofile = chm_file_name)
+        # !!! testing with low point density lidar data revealed that the default pit_fill algorithm was too aggressive
+        # ... decrease the lasR::pit_fill Size of the Laplacian filter kernel (integer value, in pixels) for low density point clouds
+        lasr_chm_pitfill = lasR::pit_fill(raster = lasr_chm, lap_size = lap_sz, ofile = chm_file_name)
       # pipeline
         pipeline = lasr_chm + lasr_chm_pitfill
         return(pipeline)
@@ -903,6 +906,12 @@
       dplyr::filter(processing_grid == processing_grid_num) %>% 
       dplyr::pull(pts_m2_factor_ctg) %>% 
       .[1]
+    # !!! testing with low point density lidar data revealed that the default pit_fill algorithm was too aggressive
+    # ... decrease the lasR::pit_fill Size of the Laplacian filter kernel (integer value, in pixels) for low density point clouds
+    lap_size_pts = process_data %>% 
+      dplyr::filter(processing_grid == processing_grid_num) %>% 
+      dplyr::pull(pts_m2) %>% 
+      .[1]
     ################
     # buld pipeline
     ################
@@ -921,9 +930,10 @@
           lasr_write_normalize +
           lasr_chm_fn(
             chm_file_name = chm_file_name
-             , chm_res = chm_res_m
-             , min_height_m = min_height
-             , max_height_m = max_height
+            , chm_res = chm_res_m
+            , min_height_m = min_height
+            , max_height_m = max_height
+            , lap_sz = ifelse(lap_size_pts<20,2,3)
           )
     }else{
       # pipeline
@@ -939,9 +949,10 @@
           lasr_write_normalize +
           lasr_chm_fn(
             chm_file_name = chm_file_name
-             , chm_res = chm_res_m
-             , min_height_m = min_height
-             , max_height_m = max_height
+            , chm_res = chm_res_m
+            , min_height_m = min_height
+            , max_height_m = max_height
+            , lap_sz = ifelse(lap_size_pts<20,2,3)
           )
     }
     # message
@@ -2050,7 +2061,7 @@
       
       ### calculate distance to nearest neighbor
         ### cap distance to nearest tree within xxm buffer
-        dist_buffer_temp = 35
+        dist_buffer_temp = 10
         # get trees within radius
         dist_tree_tops_temp = tree_tops %>% 
           dplyr::select(treeID) %>% 
