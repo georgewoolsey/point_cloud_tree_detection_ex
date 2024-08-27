@@ -753,7 +753,7 @@
   # denoise
   ###################
     # classify isolated points
-    lasr_denoise = lasR::classify_isolated_points(res =  5, n = 6)
+    lasr_denoise = lasR::classify_with_ivf(res =  5, n = 6)
     # lasr_denoise_filter = lasR::delete_points(filter = lasR::drop_noise())
     
     # classify write step after denoise
